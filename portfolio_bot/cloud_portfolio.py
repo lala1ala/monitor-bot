@@ -313,6 +313,37 @@ async def run_scan(force_report=False):
         report_msg += f"🔶 Binance: ${exchange_totals['Binance']:.2f}\n"
         report_msg += f"🚪 Gate: ${exchange_totals['Gate']:.2f}\n"
         report_msg += f"💧 Hyperliquid: ${exchange_totals['Hyperliquid']:.2f}\n"
+
+        # --- Detailed Breakdown ---
+        report_msg += f"\n📜 **持仓详情:**\n"
+        
+        # Aggregate all holdings for display
+        all_holdings_list = []
+        
+        def collect_details(holdings, source_icon):
+            for coin, amt in holdings.items():
+                p_key = 'USDC' if coin == 'USDC (HL)' else coin
+                data = price_data.get(p_key)
+                price = data['current'] if data else 0
+                val = amt * price
+                if val > 1.0: # Show only > $1
+                    all_holdings_list.append({
+                        'coin': coin, 
+                        'amt': amt, 
+                        'val': val, 
+                        'icon': source_icon
+                    })
+
+        collect_details(binance, '🔶')
+        collect_details(gate, '🚪')
+        collect_details(hl, '💧')
+
+        # Sort by value DESC
+        all_holdings_list.sort(key=lambda x: x['val'], reverse=True)
+
+        for item in all_holdings_list:
+            report_msg += f"{item['icon']} **{item['coin']}**: {item['amt']:.4g} (${item['val']:.0f})\n"
+            
         report_msg += f"\n_扫描时间: {now.strftime('%H:%M')}_"
         
         # Avoid duplicate report if alert already sent? No, user wants report.
