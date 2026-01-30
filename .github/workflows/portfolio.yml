@@ -1,0 +1,39 @@
+name: Portfolio Monitor
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'  # Runs every 20 minutes
+  workflow_dispatch:        # Allows manual run button
+
+jobs:
+  check-portfolio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests ccxt
+          
+      - name: Run Monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
+          GATE_API_KEY: ${{ secrets.GATE_API_KEY }}
+          GATE_SECRET: ${{ secrets.GATE_SECRET }}
+          HYPERLIQUID_WALLET: ${{ secrets.HYPERLIQUID_WALLET }}
+        run: |
+          # If manually triggered, passed --report flag to force send report
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            python portfolio_bot/cloud_portfolio.py --report
+          else
+            python portfolio_bot/cloud_portfolio.py
+          fi
