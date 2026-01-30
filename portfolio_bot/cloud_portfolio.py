@@ -193,56 +193,91 @@ async def get_prices_with_history(symbols):
     # Fetch Ticker (24h) is too broad.
     # Fetch kline (15m) -> take last 3 candles -> max(high)
     
-    async def fetch_prices(use_proxy=None):
+    async def fetch_prices_from_exchange(ex_name, symbols_to_fetch, use_proxy=None):
+        if not symbols_to_fetch: return
+        
         ex_config = {}
-        if use_proxy:
-            ex_config['aiohttp_proxy'] = use_proxy
-        elif CONFIG['PROXY_URL']:
-            ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
-
+        if use_proxy: ex_config['aiohttp_proxy'] = use_proxy
+        elif CONFIG['PROXY_URL']: ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
+        
         try:
-            async with ccxt.binance(ex_config) as exchange:
-                # Test connection with first symbol
-                if targets:
-                     await exchange.fetch_ohlcv(f"{targets[0]}/USDT", timeframe='15m', limit=1)
+            exchange_class = getattr(ccxt, ex_name)
+            async with exchange_class(ex_config) as exchange:
+                # Test connection (optional, acts as fail-fast)
+                # await exchange.load_markets() 
 
-                for symbol in targets:
+                for symbol in symbols_to_fetch:
+                    if symbol in results: continue # Skip if already found
+                    
                     try:
-                        # Try USDT Pair
+                        # Try standard pair
                         pair = f"{symbol}/USDT"
-                        ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=3)
-                        if not ohlcv: continue
                         
-                        current_price = ohlcv[-1][4]
-                        highs = [candle[2] for candle in ohlcv]
-                        max_30m = max(highs)
+                        # Fetch Candle (for Alert) or Ticker (fallback)
+                        # We prefer OHLV for the "Drop Alert" feature
+                        try:
+                            ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=3)
+                            if ohlcv:
+                                current_price = ohlcv[-1][4]
+                                highs = [c[2] for c in ohlcv]
+                                results[symbol] = {
+                                    'current': current_price,
+                                    'max_30m': max(highs)
+                                }
+                                continue
+                        except Exception as e:
+                            # logger.debug(f"{ex_name} OHLV fail {symbol}: {e}")
+                            pass
+
+                        # Fallback to Ticker if OHLV failed (maybe not supported or restricted)
+                        ticker = await exchange.fetch_ticker(pair)
+                        if ticker and ticker['last']:
+                            results[symbol] = {
+                                'current': float(ticker['last']),
+                                'max_30m': float(ticker['last']) # No history data
+                            }
+                    except Exception as e:
+                        # logger.debug(f"{ex_name} Price fail {symbol}: {e}")
+                        pass
                         
-                        results[symbol] = {
-                            'current': current_price,
-                            'max_30m': max_30m
-                        }
-                    except: pass
-                return True
-        except:
+            return True
+        except Exception as e:
+            logger.error(f"Exchange {ex_name} init error: {e}")
             return False
 
-    # 1. Try Direct/Private
-    if not await fetch_prices():
-        # 2. Public Proxy Retry
-        logger.info("Price fetch failed, retrying with public proxies...")
-        for _ in range(5):
+    # 1. Try Binance
+    targets = list(set(targets)) # Unique
+    
+    # Try with defaults then proxies
+    if not await fetch_prices_from_exchange('binance', targets):
+        logger.warning("Binance price fetch direct failed, trying proxy rules...")
+        # (Retry logic could be complex, for now we assume single shot attempt per exchange 
+        # or simplified proxy retry logic if critical)
+        pass
+
+    # Retry missing on Binance with public proxy?
+    missing = [s for s in targets if s not in results]
+    if missing:
+        logger.info(f"Retrying {len(missing)} missing coins on Binance with Proxy...")
+        for _ in range(3):
             pub = proxy_mgr.get_next()
             if not pub: break
-            if await fetch_prices(pub):
-                break
-                
-    # Add Stables
-                
+            await fetch_prices_from_exchange('binance', missing, use_proxy=pub)
+            missing = [s for s in targets if s not in results]
+            if not missing: break
+            
+    # 2. Try Gate for whatever is still missing
+    missing = [s for s in targets if s not in results]
+    if missing:
+        logger.info(f"Checking Gate.io for {len(missing)} missing coins: {missing}")
+        await fetch_prices_from_exchange('gateio', missing)
+        
     # Add Stables
     results['USDT'] = {'current': 1.0, 'max_30m': 1.0}
     results['USDC'] = {'current': 1.0, 'max_30m': 1.0}
     results['USDC (HL)'] = {'current': 1.0, 'max_30m': 1.0}
     
+    logger.info(f"Got prices for {len(results)}/{len(targets)} coins")
     return results
 
 # ==================== Core Logic ====================
