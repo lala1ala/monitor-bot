@@ -4,7 +4,7 @@ import time
 import logging
 import asyncio
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import ccxt.async_support as ccxt
 
 # ==================== Configuration ====================
@@ -118,7 +118,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
                 return True
                         
         except Exception as e:
-            # logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {e}")
+            logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {e}")
             return False
 
     async def attempt_fetch(type_opts):
