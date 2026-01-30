@@ -30,6 +30,7 @@ jobs:
           GATE_API_KEY: ${{ secrets.GATE_API_KEY }}
           GATE_SECRET: ${{ secrets.GATE_SECRET }}
           HYPERLIQUID_WALLET: ${{ secrets.HYPERLIQUID_WALLET }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           # If manually triggered, passed --report flag to force send report
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then

@@ -11,6 +11,7 @@ import ccxt.async_support as ccxt
 CONFIG = {
     'TG_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN'),
     'TG_CHAT_ID': os.environ.get('TELEGRAM_CHAT_ID'),
+    'PROXY_URL': os.environ.get('PROXY_URL'),
     'BINANCE': {
         'apiKey': os.environ.get('BINANCE_API_KEY'),
         'secret': os.environ.get('BINANCE_SECRET'),
@@ -38,8 +39,15 @@ async def fetch_ccxt_balance(exchange_id, credentials):
     async def get_bal(options={}):
         try:
             exchange_class = getattr(ccxt, exchange_id)
+            
+            # Prepare config with Proxy if available
+            ex_config = credentials.copy()
+            if CONFIG['PROXY_URL'] and exchange_id == 'binance':
+                 ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
+                 # ex_config['proxies'] = {'http': CONFIG['PROXY_URL'], 'https': CONFIG['PROXY_URL']}  # Backup for some versions
+
             # Create new instance for each type to avoid state issues
-            async with exchange_class(credentials) as exchange:
+            async with exchange_class(ex_config) as exchange:
                 if options:
                     exchange.options.update(options)
                 
@@ -108,7 +116,11 @@ async def get_prices_with_history(symbols):
     # Fetch Ticker (24h) is too broad.
     # Fetch kline (15m) -> take last 3 candles -> max(high)
     
-    async with ccxt.binance() as exchange:
+    ex_config = {}
+    if CONFIG['PROXY_URL']:
+        ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
+
+    async with ccxt.binance(ex_config) as exchange:
         for symbol in targets:
             try:
                 # Try USDT Pair
@@ -129,8 +141,9 @@ async def get_prices_with_history(symbols):
                     'current': current_price,
                     'max_30m': max_30m
                 }
-            except Exception:
+            except Exception as e:
                 # If symbol not on Binance, ignore for price alert but maybe assume stable
+                # logger.error(f"Price fetch error {symbol}: {e}")
                 pass
                 
     # Add Stables
