@@ -39,7 +39,9 @@ class ProxyManager:
             # Combined list source
             sources = [
                 "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-                "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+                "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+                "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
+                "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt"
             ]
             
             found = set()
@@ -48,7 +50,7 @@ class ProxyManager:
                     resp = requests.get(url, timeout=5)
                     if resp.status_code == 200:
                         lines = resp.text.splitlines()
-                        for line in lines[:50]: # take top 50 from each
+                        for line in lines[:100]: # Increase to top 100
                             if ':' in line: found.add(f"http://{line.strip()}")
                 except: continue
                     
@@ -63,6 +65,7 @@ class ProxyManager:
         
         if not self.proxies: return None
         
+        # Simple rotation
         if self.index >= len(self.proxies):
             self.index = 0
             
@@ -73,6 +76,8 @@ class ProxyManager:
 proxy_mgr = ProxyManager()
 
 # ==================== Data Fetching (Stateless) ====================
+def get_beijing_time():
+    return datetime.utcnow() + timedelta(hours=8)
 
 async def fetch_ccxt_balance(exchange_id, credentials):
     """Fetch held assets from CCXT exchange (Spot + Futures)"""
@@ -303,7 +308,7 @@ async def run_scan(force_report=False):
     # Condition B: Send Periodic Report (Every 4 hours)
     # Since this runs every 20 mins, we check if hour % 4 == 0 and minute < 20
     # OR if manually triggered (github workflow input)
-    now = datetime.now()
+    now = get_beijing_time()
     is_periodic_time = (now.hour % 4 == 0) and (now.minute < 25)
     
     if force_report or is_periodic_time:
@@ -344,7 +349,7 @@ async def run_scan(force_report=False):
         for item in all_holdings_list:
             report_msg += f"{item['icon']} **{item['coin']}**: {item['amt']:.4g} (${item['val']:.0f})\n"
             
-        report_msg += f"\n_扫描时间: {now.strftime('%H:%M')}_"
+        report_msg += f"\n_扫描时间: {now.strftime('%H:%M')} (Beijing)_"
         
         # Avoid duplicate report if alert already sent? No, user wants report.
         send_tg(report_msg)
