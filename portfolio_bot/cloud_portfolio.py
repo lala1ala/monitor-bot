@@ -342,6 +342,8 @@ async def run_scan(force_report=False):
                         'val': val, 
                         'icon': source_icon
                     })
+                elif amt > 0 and price == 0:
+                     logger.warning(f"⚠️ Zero Price for {coin} (Amount: {amt}) - Check if pricing symbol matches")
 
         collect_details(binance, '🔶')
         collect_details(gate, '🚪')
@@ -349,10 +351,6 @@ async def run_scan(force_report=False):
 
         # Sort by value DESC
         all_holdings_list.sort(key=lambda x: x['val'], reverse=True)
-
-        collect_details(binance, '🔶')
-        collect_details(gate, '🚪')
-        collect_details(hl, '💧')
 
         # Sort by value DESC
         all_holdings_list.sort(key=lambda x: x['val'], reverse=True)
