@@ -29,23 +29,44 @@ logger = logging.getLogger(__name__)
 # ==================== Data Fetching (Stateless) ====================
 
 async def fetch_ccxt_balance(exchange_id, credentials):
-    """Fetch held assets from CCXT exchange"""
-    # Skip if no keys, but allow running if just one is missing
+    """Fetch held assets from CCXT exchange (Spot + Futures)"""
+    # Skip if no keys
     if not credentials['apiKey']: return {}
     
-    try:
-        exchange_class = getattr(ccxt, exchange_id)
-        async with exchange_class(credentials) as exchange:
-            # Load markets for pricing if possible, but we use unified pricing later
-            balance = await exchange.fetch_balance()
-            holdings = {}
-            items = balance.get('total', {})
-            for symbol, amount in items.items():
-                if amount > 0: holdings[symbol] = amount
-            return holdings
-    except Exception as e:
-        logger.error(f"Error fetching {exchange_id}: {e}")
-        return {}
+    holdings = {}
+    
+    async def get_bal(options={}):
+        try:
+            exchange_class = getattr(ccxt, exchange_id)
+            # Create new instance for each type to avoid state issues
+            async with exchange_class(credentials) as exchange:
+                if options:
+                    exchange.options.update(options)
+                
+                # Fetch Balance
+                balance = await exchange.fetch_balance()
+                
+                # Standardize 'total'
+                items = balance.get('total', {})
+                for symbol, amount in items.items():
+                    if amount > 0:
+                        holdings[symbol] = holdings.get(symbol, 0) + amount
+                        
+        except Exception as e:
+            logger.error(f"Error fetching {exchange_id} (opts={options}): {e}")
+
+    # 1. Fetch Spot (Default)
+    await get_bal({})
+    
+    # 2. Fetch Futures (If supported)
+    # Binance uses 'defaultType': 'future'
+    # Gate uses 'defaultType': 'swap' (often) but let's try standard options
+    if exchange_id == 'binance':
+        await get_bal({'defaultType': 'future'})
+    elif exchange_id == 'gateio':
+        await get_bal({'defaultType': 'swap'}) # 'swap' usually covers perpetuals for Gate
+        
+    return holdings
 
 def fetch_hyperliquid_balance(wallet):
     """Fetch Hyperliquid account value via REST"""
