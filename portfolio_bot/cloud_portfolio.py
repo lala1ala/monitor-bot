@@ -112,9 +112,13 @@ async def fetch_ccxt_balance(exchange_id, credentials):
                 
                 # Standardize 'total'
                 items = balance.get('total', {})
+                logger.info(f"{exchange_id} Raw Balance Keys: {list(items.keys())}") # Debugging
+                
                 for symbol, amount in items.items():
                     if amount > 0:
                         holdings[symbol] = holdings.get(symbol, 0) + amount
+                
+                logger.info(f"{exchange_id} Positive Holdings: {holdings}") # Debugging
                 return True
                         
         except Exception as e:
@@ -346,8 +350,17 @@ async def run_scan(force_report=False):
         # Sort by value DESC
         all_holdings_list.sort(key=lambda x: x['val'], reverse=True)
 
+        collect_details(binance, '🔶')
+        collect_details(gate, '🚪')
+        collect_details(hl, '💧')
+
+        # Sort by value DESC
+        all_holdings_list.sort(key=lambda x: x['val'], reverse=True)
+
         for item in all_holdings_list:
-            report_msg += f"{item['icon']} **{item['coin']}**: {item['amt']:.4g} (${item['val']:.0f})\n"
+            # Use comma for thousands, 4 decimals for small amounts, 2 for large
+            qty_fmt = "{:,.4f}" if item['amt'] < 1000 else "{:,.2f}"
+            report_msg += f"{item['icon']} **{item['coin']}**: {qty_fmt.format(item['amt'])} (${item['val']:,.0f})\n"
             
         report_msg += f"\n_扫描时间: {now.strftime('%H:%M')} (Beijing)_"
         
@@ -371,4 +384,11 @@ def send_tg(text):
 if __name__ == "__main__":
     # Check for manual trigger flag from args
     is_manual = len(sys.argv) > 1 and sys.argv[1] == '--report'
-    asyncio.run(run_scan(force_report=is_manual))
+    
+    # Run!
+    try:
+        asyncio.run(run_scan(force_report=is_manual))
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
+        # Send error to TG if possible
+        send_tg(f"⚠️ Bot Critical Error: {e}")
