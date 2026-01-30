@@ -92,6 +92,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
             
             # Prepare config
             ex_config = credentials.copy()
+            ex_config['timeout'] = 10000 # 10s timeout
             
             # 1. Private Proxy / Explicit Proxy
             if use_proxy:
@@ -133,7 +134,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
         # 2. If binance failed, try Public Proxies rotation
         if exchange_id == 'binance':
             logger.info("Direct/Private connection failed, trying public proxies...")
-            for _ in range(5):
+            for _ in range(3): # Reduced to 3
                 pub_proxy = proxy_mgr.get_next()
                 if not pub_proxy: break
                 
@@ -197,6 +198,7 @@ async def get_prices_with_history(symbols):
         if not symbols_to_fetch: return
         
         ex_config = {}
+        ex_config['timeout'] = 10000 # 10s timeout
         if use_proxy: ex_config['aiohttp_proxy'] = use_proxy
         elif CONFIG['PROXY_URL']: ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
         
@@ -259,7 +261,7 @@ async def get_prices_with_history(symbols):
     missing = [s for s in targets if s not in results]
     if missing:
         logger.info(f"Retrying {len(missing)} missing coins on Binance with Proxy...")
-        for _ in range(3):
+        for _ in range(2): # Reduced to 2
             pub = proxy_mgr.get_next()
             if not pub: break
             await fetch_prices_from_exchange('binance', missing, use_proxy=pub)
