@@ -24,8 +24,50 @@ CONFIG = {
 }
 
 # Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-logger = logging.getLogger(__name__)
+# ==================== Proxy Manager ====================
+class ProxyManager:
+    def __init__(self):
+        self.proxies = []
+        self.index = 0
+        
+    def get_public_proxies(self):
+        """Fetch public proxies from github lists"""
+        try:
+            # Combined list source
+            sources = [
+                "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+                "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+            ]
+            
+            found = set()
+            for url in sources:
+                try:
+                    resp = requests.get(url, timeout=5)
+                    if resp.status_code == 200:
+                        lines = resp.text.splitlines()
+                        for line in lines[:50]: # take top 50 from each
+                            if ':' in line: found.add(f"http://{line.strip()}")
+                except: continue
+                    
+            self.proxies = list(found)
+            logger.info(f"Fetched {len(self.proxies)} public proxies")
+        except Exception as e:
+            logger.error(f"Proxy fetch error: {e}")
+
+    def get_next(self):
+        if not self.proxies:
+            self.get_public_proxies()
+        
+        if not self.proxies: return None
+        
+        if self.index >= len(self.proxies):
+            self.index = 0
+            
+        p = self.proxies[self.index]
+        self.index += 1
+        return p
+
+proxy_mgr = ProxyManager()
 
 # ==================== Data Fetching (Stateless) ====================
 
@@ -36,15 +78,18 @@ async def fetch_ccxt_balance(exchange_id, credentials):
     
     holdings = {}
     
-    async def get_bal(options={}):
+    async def get_bal(options={}, use_proxy=None):
         try:
             exchange_class = getattr(ccxt, exchange_id)
             
-            # Prepare config with Proxy if available
+            # Prepare config
             ex_config = credentials.copy()
-            if CONFIG['PROXY_URL'] and exchange_id == 'binance':
+            
+            # 1. Private Proxy / Explicit Proxy
+            if use_proxy:
+                ex_config['aiohttp_proxy'] = use_proxy
+            elif CONFIG['PROXY_URL'] and exchange_id == 'binance':
                  ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
-                 # ex_config['proxies'] = {'http': CONFIG['PROXY_URL'], 'https': CONFIG['PROXY_URL']}  # Backup for some versions
 
             # Create new instance for each type to avoid state issues
             async with exchange_class(ex_config) as exchange:
@@ -54,25 +99,45 @@ async def fetch_ccxt_balance(exchange_id, credentials):
                 # Fetch Balance
                 balance = await exchange.fetch_balance()
                 
+                # Check for "restricted" msg in raw response if possible (hard with ccxt standard)
+                # But typically fetch_balance raises exception on error.
+                
                 # Standardize 'total'
                 items = balance.get('total', {})
                 for symbol, amount in items.items():
                     if amount > 0:
                         holdings[symbol] = holdings.get(symbol, 0) + amount
+                return True
                         
         except Exception as e:
-            logger.error(f"Error fetching {exchange_id} (opts={options}): {e}")
+            # logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {e}")
+            return False
 
-    # 1. Fetch Spot (Default)
-    await get_bal({})
+    async def attempt_fetch(type_opts):
+        # 1. Try Default (Direct or Private Proxy)
+        success = await get_bal(type_opts)
+        if success: return
+
+        # 2. If binance failed, try Public Proxies rotation
+        if exchange_id == 'binance':
+            logger.info("Direct/Private connection failed, trying public proxies...")
+            for _ in range(5):
+                pub_proxy = proxy_mgr.get_next()
+                if not pub_proxy: break
+                
+                success = await get_bal(type_opts, use_proxy=pub_proxy)
+                if success: 
+                    logger.info(f"Success with public proxy")
+                    return
+
+    # 1. Fetch Spot
+    await attempt_fetch({})
     
-    # 2. Fetch Futures (If supported)
-    # Binance uses 'defaultType': 'future'
-    # Gate uses 'defaultType': 'swap' (often) but let's try standard options
+    # 2. Fetch Futures
     if exchange_id == 'binance':
-        await get_bal({'defaultType': 'future'})
+        await attempt_fetch({'defaultType': 'future'})
     elif exchange_id == 'gateio':
-        await get_bal({'defaultType': 'swap'}) # 'swap' usually covers perpetuals for Gate
+        await attempt_fetch({'defaultType': 'swap'})
         
     return holdings
 
@@ -116,35 +181,50 @@ async def get_prices_with_history(symbols):
     # Fetch Ticker (24h) is too broad.
     # Fetch kline (15m) -> take last 3 candles -> max(high)
     
-    ex_config = {}
-    if CONFIG['PROXY_URL']:
-        ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
+    async def fetch_prices(use_proxy=None):
+        ex_config = {}
+        if use_proxy:
+            ex_config['aiohttp_proxy'] = use_proxy
+        elif CONFIG['PROXY_URL']:
+            ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
 
-    async with ccxt.binance(ex_config) as exchange:
-        for symbol in targets:
-            try:
-                # Try USDT Pair
-                pair = f"{symbol}/USDT"
+        try:
+            async with ccxt.binance(ex_config) as exchange:
+                # Test connection with first symbol
+                if targets:
+                     await exchange.fetch_ohlcv(f"{targets[0]}/USDT", timeframe='15m', limit=1)
+
+                for symbol in targets:
+                    try:
+                        # Try USDT Pair
+                        pair = f"{symbol}/USDT"
+                        ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=3)
+                        if not ohlcv: continue
+                        
+                        current_price = ohlcv[-1][4]
+                        highs = [candle[2] for candle in ohlcv]
+                        max_30m = max(highs)
+                        
+                        results[symbol] = {
+                            'current': current_price,
+                            'max_30m': max_30m
+                        }
+                    except: pass
+                return True
+        except:
+            return False
+
+    # 1. Try Direct/Private
+    if not await fetch_prices():
+        # 2. Public Proxy Retry
+        logger.info("Price fetch failed, retrying with public proxies...")
+        for _ in range(5):
+            pub = proxy_mgr.get_next()
+            if not pub: break
+            if await fetch_prices(pub):
+                break
                 
-                # Fetch recent candles (15m timeframe, last 3 candles = 45 mins coverage)
-                # This covers the "30 min" window safely
-                ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=3)
-                if not ohlcv: continue
-                
-                current_price = ohlcv[-1][4] # Close of latest
-                
-                # Calculate Max High in the last 3 candles
-                highs = [candle[2] for candle in ohlcv]
-                max_30m = max(highs)
-                
-                results[symbol] = {
-                    'current': current_price,
-                    'max_30m': max_30m
-                }
-            except Exception as e:
-                # If symbol not on Binance, ignore for price alert but maybe assume stable
-                # logger.error(f"Price fetch error {symbol}: {e}")
-                pass
+    # Add Stables
                 
     # Add Stables
     results['USDT'] = {'current': 1.0, 'max_30m': 1.0}
