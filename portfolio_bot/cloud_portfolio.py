@@ -47,7 +47,7 @@ class ProxyManager:
             found = set()
             for url in sources:
                 try:
-                    resp = requests.get(url, timeout=5)
+                    resp = requests.get(url, timeout=2) # Reduced timeout
                     if resp.status_code == 200:
                         lines = resp.text.splitlines()
                         for line in lines[:100]: # Increase to top 100
@@ -92,7 +92,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
             
             # Prepare config
             ex_config = credentials.copy()
-            ex_config['timeout'] = 10000 # 10s timeout
+            ex_config['timeout'] = 3000 # 3s timeout (was 10s)
             
             # 1. Private Proxy / Explicit Proxy
             if use_proxy:
@@ -134,7 +134,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
         # 2. If binance failed, try Public Proxies rotation
         if exchange_id == 'binance':
             logger.info("Direct/Private connection failed, trying public proxies...")
-            for _ in range(3): # Reduced to 3
+            for _ in range(1): # Reduced to 1 retry
                 pub_proxy = proxy_mgr.get_next()
                 if not pub_proxy: break
                 
@@ -198,7 +198,7 @@ async def get_prices_with_history(symbols):
         if not symbols_to_fetch: return
         
         ex_config = {}
-        ex_config['timeout'] = 10000 # 10s timeout
+        ex_config['timeout'] = 3000 # 3s timeout
         if use_proxy: ex_config['aiohttp_proxy'] = use_proxy
         elif CONFIG['PROXY_URL']: ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
         
@@ -261,7 +261,7 @@ async def get_prices_with_history(symbols):
     missing = [s for s in targets if s not in results]
     if missing:
         logger.info(f"Retrying {len(missing)} missing coins on Binance with Proxy...")
-        for _ in range(2): # Reduced to 2
+        for _ in range(1): # Reduced to 1
             pub = proxy_mgr.get_next()
             if not pub: break
             await fetch_prices_from_exchange('binance', missing, use_proxy=pub)
@@ -337,7 +337,8 @@ async def run_scan(force_report=False):
         if high > 0:
             drop = (high - curr) / high
             if drop >= 0.02: # 2% Threshold
-                alerts.append(f"⚠️ **{coin} 急跌警报**\n30分钟内回撤: `-{drop*100:.2f}%`\n现价: ${curr:.4f}")
+                p_fmt = f"{curr:.8f}" if curr < 0.1 else f"{curr:.4f}"
+                alerts.append(f"⚠️ **{coin} 急跌警报**\n30分钟内回撤: `-{drop*100:.2f}%`\n现价: ${p_fmt}")
 
     # 5. Decide to Send Message
     
@@ -347,10 +348,9 @@ async def run_scan(force_report=False):
         send_tg(alert_msg)
         
     # Condition B: Send Periodic Report (Every 4 hours)
-    # Since this runs every 20 mins, we check if hour % 4 == 0 and minute < 20
-    # OR if manually triggered (github workflow input)
     now = get_beijing_time()
-    is_periodic_time = (now.hour % 4 == 0) and (now.minute < 25)
+    # Run hourly, but report only every 4 hours (0, 4, 8, 12, 16, 20)
+    is_periodic_time = (now.hour % 4 == 0)
     
     if force_report or is_periodic_time:
         report_msg = f"📊 **持仓监控报告**\n"
