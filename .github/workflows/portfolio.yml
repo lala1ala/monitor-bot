@@ -34,7 +34,7 @@ jobs:
         run: |
           # If manually triggered, passed --report flag to force send report
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            python portfolio_bot/cloud_portfolio.py --report
+            python -u portfolio_bot/cloud_portfolio.py --report
           else
-            python portfolio_bot/cloud_portfolio.py
+            python -u portfolio_bot/cloud_portfolio.py
           fi
