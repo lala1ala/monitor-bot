@@ -23,8 +23,8 @@ jobs:
           
       - name: Run Monitor
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.PORTFOLIO_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.PORTFOLIO_CHAT_ID }}
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
           GATE_API_KEY: ${{ secrets.GATE_API_KEY }}
