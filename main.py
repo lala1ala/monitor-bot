@@ -340,8 +340,15 @@ def main():
 
     except Exception as e:
         logger.error(f"执行出错: {e}", exc_info=True)
-        # 可选：发送错误日志到简单的 TG 通知
-        # requests.post(...) 
+        # 发送错误日志到 TG 通知
+        try:
+             url = f"https://api.telegram.org/bot{config.bot_token}/sendMessage"
+             requests.post(url, json={"chat_id": config.chat_id, "text": f"⚠️ Monitor Bot Critical Error:\n{str(e)}", "parse_mode": "HTML"})
+        except:
+             pass
+        # 让 GitHub Action 标记为失败
+        import sys
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
