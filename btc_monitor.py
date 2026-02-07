@@ -39,9 +39,23 @@ class DataFetcher:
             data = resp.json()
             return [x for x in data if x['symbol'].endswith('USDT')]
         except Exception as e:
-            print(f"Error fetching Binance tickers: {e}")
-            # Fallback: simple price check
+            print(f"Error fetching Binance Futures tickers: {e}")
+            # Fallback: Try Spot API for at least BTC price?
+            # Or just return empty list. Spot API structure is different (symbol, price).
+            # Let's try to get at least BTC price for the main loop if we can.
+            # But the main loop expects list of objects with quoteVolume etc.
+            # So fallback is complex for full list, but we can potentially handle single price later.
             return []
+            
+    def get_btc_price_fallback(self):
+        """Fallback to get BTC price from Spot API"""
+        try:
+            url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+            resp = requests.get(url, timeout=5)
+            data = resp.json()
+            return float(data.get('price', 0))
+        except:
+            return 0
 
     def get_binance_daily_candles(self, symbol="BTCUSDT", limit=250):
         """Fetch daily candles for MA calculation"""
@@ -228,6 +242,11 @@ class BtcMonitor:
             btc_item = next((x for x in sorted_vol if x['symbol'] == 'BTCUSDT'), None)
             btc_vol = float(btc_item['quoteVolume']) if btc_item else 0
             current_btc_price = float(btc_item['lastPrice']) if btc_item else 0
+        
+        if current_btc_price == 0:
+            print("Warning: BTC Price is 0. Attempting fallback...")
+            current_btc_price = self.fetcher.get_btc_price_fallback()
+            print(f"Fallback BTC Price: {current_btc_price}")
             
             for x in sorted_vol[:10]:
                 sym = x['symbol']
@@ -252,9 +271,15 @@ class BtcMonitor:
             print(f"Total Coinalyze markets: {len(all_markets)}")
             perpetuals = [m for m in all_markets if m.get('is_perpetual')]
             
-            # Group symbols
-            btc_perps = [m['symbol'] for m in perpetuals if m.get('base_asset') == 'BTC']
-            eth_perps = [m['symbol'] for m in perpetuals if m.get('base_asset') == 'ETH']
+            # Top Exchanges: Binance(A, 6), Bybit(4), OKX(3)
+            # This covers approx 90% of market open interest.
+            TOP_EXCHANGES = ['A', '6', '4', '3']
+            def is_top_tier(m):
+                return m.get('exchange') in TOP_EXCHANGES
+
+            # Group symbols (Filtered)
+            btc_perps = [m['symbol'] for m in perpetuals if m.get('base_asset') == 'BTC' and is_top_tier(m)]
+            eth_perps = [m['symbol'] for m in perpetuals if m.get('base_asset') == 'ETH' and is_top_tier(m)]
             
             # For Alts, we take the top 100 by Binance volume to estimate "All Alts"
             binance_vol_map = {item['symbol']: float(item['quoteVolume']) for item in binance_data} if binance_data else {}
@@ -262,6 +287,8 @@ class BtcMonitor:
             
             other_perps = []
             for m in perpetuals:
+                if not is_top_tier(m): continue # Skip small exchanges
+                
                 base = m.get('base_asset')
                 if base in ['BTC', 'ETH']: continue
                 
