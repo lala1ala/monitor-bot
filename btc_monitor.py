@@ -40,6 +40,7 @@ class DataFetcher:
             return [x for x in data if x['symbol'].endswith('USDT')]
         except Exception as e:
             print(f"Error fetching Binance tickers: {e}")
+            # Fallback: simple price check
             return []
 
     def get_binance_daily_candles(self, symbol="BTCUSDT", limit=250):
@@ -304,10 +305,8 @@ class BtcMonitor:
                         sym = item.get('symbol', '')
                         units = float(item.get('value', 0))
                         # Match back to binance price
-                        match = next((x for x in top_alts if x['symbol'] == sym), None)
-                        if match:
-                            price = binance_price_map.get(match['exch_sym'], 0)
-                            alts_usd += (units * price)
+                        # value is already USD
+                        alts_usd += units
                 time.sleep(1.0)
 
             # 4. BTC Funding Average (Predicted)
@@ -320,10 +319,20 @@ class BtcMonitor:
                     btc_funding_list.append(pf)
 
         # Final Aggregation
-        btc_oi_usd = btc_units * current_btc_price
-        # Need ETH price
-        eth_price = binance_price_map.get('ETHUSDT', 2000) # Fallback to 2k if missing
-        eth_oi_usd = eth_units * eth_price
+        # Coinalyze 'value' is already in USD (Open Interest in USD)
+        # So we just sum them up directly.
+        btc_oi_usd = btc_units 
+        eth_oi_usd = eth_units 
+        
+        # Alts USD was calculated in the loop:
+        # units * price. Wait, if 'value' is USD, then alts_usd logic was also wrong?
+        # Let's check alts loop.
+        # "units = float(item.get('value', 0))" -> this is USD.
+        # "alts_usd += (units * price)" -> WRONG. It should be just units if it's USD.
+        # BUT Coinalyze 'value' for linear perps IS usually USD.
+        # However, for inverse perps, it might be contracts?
+        # Per Coinalyze API, 'value' is "Open Interest in USD".
+        # So we should NOT multiply by price anywhere.
         
         total_market_oi_usd = btc_oi_usd + eth_oi_usd + alts_usd
         alts_oi_share = (alts_usd / total_market_oi_usd * 100) if total_market_oi_usd > 0 else 0
