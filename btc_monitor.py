@@ -297,11 +297,11 @@ class BtcMonitor:
                 if vol > 0:
                     other_perps.append({"symbol": m['symbol'], "vol": vol, "exch_sym": exch_sym})
             
-            # Sort and take top 100 alts
+            # Sort and take top 30 alts (Reduced from 100 to avoid Rate Limits)
             other_perps.sort(key=lambda x: x['vol'], reverse=True)
-            top_alts = other_perps[:100]
+            top_alts = other_perps[:30]
             alt_symbols = [x['symbol'] for x in top_alts]
-
+            
             # Fetch Data in Batches
             # 1. BTC Totals
             print(f"Fetching {len(btc_perps)} BTC perpetuals...")
@@ -321,11 +321,12 @@ class BtcMonitor:
                     for item in resp: eth_units += float(item.get('value', 0))
                 time.sleep(1.0)
             
-            # 3. Alts Totals (Estimated via top 100)
+            # 3. Alts Totals (Estimated via top 30)
             # Fetch for Alts and calculate USD immediately using Binance prices
             print(f"Fetching {len(alt_symbols)} Top Alt perpetuals...")
-            for i in range(0, len(alt_symbols), 100):
-                batch = alt_symbols[i:i+100]
+            # Single batch of 30 should be safe
+            for i in range(0, len(alt_symbols), 50):
+                batch = alt_symbols[i:i+50]
                 resp = self.fetcher.get_coinalyze_oi(batch)
                 if resp:
                     for item in resp:
@@ -342,8 +343,11 @@ class BtcMonitor:
             fund_resp = self.fetcher.get_coinalyze_funding(",".join(top_btc_for_fund))
             if fund_resp:
                 for f_item in fund_resp:
-                    pf = float(f_item.get('pf', 0))
+                    # 'value' is likely the predicted funding rate in percentage (e.g. 0.01 for 0.01%)
+                    pf = float(f_item.get('value', 0))
                     btc_funding_list.append(pf)
+            else:
+                pass
 
         # Final Aggregation
         # Coinalyze 'value' is already in USD (Open Interest in USD)
