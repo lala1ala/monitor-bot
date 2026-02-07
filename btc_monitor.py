@@ -6,9 +6,10 @@ from datetime import datetime
 
 # ==================== CONFIGURATION ====================
 # API Keys
-COINGLASS_API_KEY = os.environ.get("COINGLASS_SECRET", "438d3e0c3aaa4fdd9caa5d7853e41cb3")
-COINALYZE_API_KEY = os.environ.get("COINALYZE_KEY", "af1e3712-4a26-4293-bba4-579f6b736daa")
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1469265206646542348/cBUvNdqBZgji_AY7huzVjVbQ-XEkDAL3A0Z1snmdc2IEaFFN5yAxenAgrEuqaIVPllme")
+# Use 'or' to fallback if the env var is set but empty (e.g. GHA empty secret)
+COINGLASS_API_KEY = os.environ.get("COINGLASS_SECRET") or "438d3e0c3aaa4fdd9caa5d7853e41cb3"
+COINALYZE_API_KEY = os.environ.get("COINALYZE_KEY") or "af1e3712-4a26-4293-bba4-579f6b736daa"
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL") or "https://discord.com/api/webhooks/1469265206646542348/cBUvNdqBZgji_AY7huzVjVbQ-XEkDAL3A0Z1snmdc2IEaFFN5yAxenAgrEuqaIVPllme"
 
 # Thresholds
 ALTS_OI_REL_THRESHOLD = 0.55  # Warning if Alts OI > 55% of Total
@@ -218,6 +219,8 @@ class BtcMonitor:
         binance_data = self.fetcher.get_binance_ticker_24hr()
         current_btc_price = 0
         hot_alts = []
+        binance_price_map = {}
+        binance_vol_map = {}
         
         if binance_data:
             sorted_vol = sorted(binance_data, key=lambda x: float(x['quoteVolume']), reverse=True)
