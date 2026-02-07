@@ -1,0 +1,30 @@
+name: BTC Decision System Daily Report
+
+on:
+  schedule:
+    # Run twice a day: 00:00 and 12:00 UTC
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:
+
+jobs:
+  daily-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run BTC Monitor
+        env:
+          COINGLASS_SECRET: ${{ secrets.COINGLASS_SECRET }}
+          COINALYZE_KEY: ${{ secrets.COINALYZE_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python btc_monitor.py
