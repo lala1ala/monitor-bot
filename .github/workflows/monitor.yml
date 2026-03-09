@@ -26,7 +26,7 @@ jobs:
     - name: Run Monitor Script
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID_RADAR }}
         FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
       run: |
         python main.py
