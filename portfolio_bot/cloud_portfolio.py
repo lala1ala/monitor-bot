@@ -7,6 +7,12 @@ import requests
 from datetime import datetime, timedelta
 import ccxt.async_support as ccxt
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ==================== Configuration ====================
 CONFIG = {
     'TG_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN'),
@@ -87,6 +93,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
     holdings = {}
     
     async def get_bal(options={}, use_proxy=None):
+        exchange = None
         try:
             exchange_class = getattr(ccxt, exchange_id)
             
@@ -101,30 +108,37 @@ async def fetch_ccxt_balance(exchange_id, credentials):
                  ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
 
             # Create new instance for each type to avoid state issues
-            async with exchange_class(ex_config) as exchange:
-                if options:
-                    exchange.options.update(options)
-                
-                # Fetch Balance
-                balance = await exchange.fetch_balance()
-                
-                # Check for "restricted" msg in raw response if possible (hard with ccxt standard)
-                # But typically fetch_balance raises exception on error.
-                
-                # Standardize 'total'
-                items = balance.get('total', {})
-                logger.info(f"{exchange_id} Raw Balance Keys: {list(items.keys())}") # Debugging
-                
-                for symbol, amount in items.items():
-                    if amount > 0:
-                        holdings[symbol] = holdings.get(symbol, 0) + amount
-                
-                logger.info(f"{exchange_id} Positive Holdings: {holdings}") # Debugging
-                return True
+            exchange = exchange_class(ex_config)
+            if options:
+                exchange.options.update(options)
+            
+            # Fetch Balance
+            balance = await exchange.fetch_balance()
+            
+            # Standardize 'total'
+            items = balance.get('total', {})
+            logger.info(f"{exchange_id} Raw Balance Keys: {list(items.keys())}") # Debugging
+            
+            for symbol, amount in items.items():
+                if amount > 0:
+                    holdings[symbol] = holdings.get(symbol, 0) + amount
+            
+            logger.info(f"{exchange_id} Positive Holdings: {holdings}") # Debugging
+            return True
                         
         except Exception as e:
-            logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {e}")
+            err_msg = str(e)
+            if "futures permission" in err_msg or "FORBIDDEN" in err_msg:
+                logger.warning(f"⚠️ {exchange_id} API key does not have futures (swap) permission, skipping futures balance.")
+            else:
+                logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {e}")
             return False
+        finally:
+            if exchange:
+                try:
+                    await exchange.close()
+                except Exception as e_close:
+                    logger.debug(f"Failed to close exchange connection: {e_close}")
 
     async def attempt_fetch(type_opts):
         # 1. Try Default (Direct or Private Proxy)
@@ -202,52 +216,57 @@ async def get_prices_with_history(symbols):
         if use_proxy: ex_config['aiohttp_proxy'] = use_proxy
         elif CONFIG['PROXY_URL']: ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
         
+        exchange = None
         try:
             exchange_class = getattr(ccxt, ex_name)
-            async with exchange_class(ex_config) as exchange:
-                # Test connection (optional, acts as fail-fast)
-                # await exchange.load_markets() 
-
-                for symbol in symbols_to_fetch:
-                    if symbol in results: continue # Skip if already found
-                    
+            exchange = exchange_class(ex_config)
+            
+            # Use a semaphore to limit concurrency and avoid hitting rate limits
+            sem = asyncio.Semaphore(10)
+            
+            async def fetch_single(symbol):
+                if symbol in results: return
+                async with sem:
+                    pair = f"{symbol}/USDT"
+                    # We prefer OHLV for the "Drop Alert" feature
                     try:
-                        # Try standard pair
-                        pair = f"{symbol}/USDT"
-                        
-                        # Fetch Candle (for Alert) or Ticker (fallback)
-                        # We prefer OHLV for the "Drop Alert" feature
-                        try:
-                            ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=3)
-                            if ohlcv:
-                                current_price = ohlcv[-1][4]
-                                highs = [c[2] for c in ohlcv]
-                                results[symbol] = {
-                                    'current': current_price,
-                                    'max_30m': max(highs)
-                                }
-                                continue
-                        except Exception as e:
-                            # logger.debug(f"{ex_name} OHLV fail {symbol}: {e}")
-                            pass
+                        ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=3)
+                        if ohlcv:
+                            current_price = ohlcv[-1][4]
+                            highs = [c[2] for c in ohlcv]
+                            results[symbol] = {
+                                'current': current_price,
+                                'max_30m': max(highs)
+                            }
+                            return
+                    except Exception:
+                        pass
 
-                        # Fallback to Ticker if OHLV failed (maybe not supported or restricted)
+                    # Fallback to Ticker if OHLV failed (maybe not supported or restricted)
+                    try:
                         ticker = await exchange.fetch_ticker(pair)
                         if ticker and ticker['last']:
                             results[symbol] = {
                                 'current': float(ticker['last']),
                                 'max_30m': float(ticker['last']) # No history data
                             }
-                    except Exception as e:
-                        # logger.debug(f"{ex_name} Price fail {symbol}: {e}")
+                    except Exception:
                         pass
-                        
+            
+            tasks = [fetch_single(s) for s in symbols_to_fetch]
+            await asyncio.gather(*tasks)
             return True
         except Exception as e:
-            logger.error(f"Exchange {ex_name} init error: {e}")
+            logger.error(f"Exchange {ex_name} error: {e}")
             return False
-
-    # 1. Try Binance
+        finally:
+            if exchange:
+                try:
+                    await exchange.close()
+                except Exception as e_close:
+                    logger.debug(f"Failed to close exchange connection: {e_close}")
+                    
+        # 1. Try Binance
     targets = list(set(targets)) # Unique
     
     # Try with defaults then proxies
@@ -404,13 +423,17 @@ async def run_scan(force_report=False):
 
 def send_tg(text):
     if not CONFIG['TG_TOKEN'] or not CONFIG['TG_CHAT_ID']:
-        print("Skipping TG Send (No Config):", text)
+        enc = sys.stdout.encoding or 'utf-8'
+        safe_text = text.encode(enc, errors='replace').decode(enc)
+        print("Skipping TG Send (No Config):", safe_text)
         return
     url = f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/sendMessage"
     try:
-        resp = requests.post(url, json={"chat_id": CONFIG['TG_CHAT_ID'], "text": text, "parse_mode": "Markdown"})
+        resp = requests.post(url, json={"chat_id": CONFIG['TG_CHAT_ID'], "text": text, "parse_mode": "Markdown"}, timeout=10)
         if resp.status_code != 200:
-            print(f"⚠️ Telegram Send Error: {resp.status_code} - {resp.text}")
+            enc = sys.stdout.encoding or 'utf-8'
+            err_msg = f"⚠️ Telegram Send Error: {resp.status_code} - {resp.text}"
+            print(err_msg.encode(enc, errors='replace').decode(enc))
         else:
             print("✅ Telegram Message Sent Successfully")
     except Exception as e:
@@ -424,6 +447,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(run_scan(force_report=is_manual))
     except Exception as e:
-        print(f"CRITICAL ERROR: {e}")
+        enc = sys.stdout.encoding or 'utf-8'
+        err_msg = f"CRITICAL ERROR: {e}"
+        print(err_msg.encode(enc, errors='replace').decode(enc))
         # Send error to TG if possible
         send_tg(f"⚠️ Bot Critical Error: {e}")
+
