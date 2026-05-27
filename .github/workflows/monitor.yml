@@ -2,8 +2,8 @@ name: Binance Monitor Task
 
 on:
   schedule:
-    # 每小时的 0分 和 30分 运行
-    - cron: '30 * * * *'
+    # 每小时的 15分 和 45分 运行 (双倍频率, 避开拥堵)
+    - cron: '15,45 * * * *'
   workflow_dispatch: # 允许手动点击运行测试
 
 jobs:

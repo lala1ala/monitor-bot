@@ -2,7 +2,7 @@ name: Portfolio Monitor
 
 on:
   schedule:
-    - cron: '0 * * * *'   # Runs every hour
+    - cron: '10,30,50 * * * *'   # Runs every 20 minutes (non-congested)
   workflow_dispatch:        # Allows manual run button
 
 jobs:

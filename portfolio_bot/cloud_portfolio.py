@@ -368,8 +368,9 @@ async def run_scan(force_report=False):
         
     # Condition B: Send Periodic Report (Every 4 hours)
     now = get_beijing_time()
-    # Run hourly, but report only every 4 hours (0, 4, 8, 12, 16, 20)
-    is_periodic_time = (now.hour % 4 == 0)
+    # Run every 20 minutes, but report only every 4 hours (0, 4, 8, 12, 16, 20)
+    # Restrict to first run of the hour (minute < 25) to prevent duplicates
+    is_periodic_time = (now.hour % 4 == 0) and (now.minute < 25)
     
     if force_report or is_periodic_time:
         report_msg = f"📊 **持仓监控报告**\n"

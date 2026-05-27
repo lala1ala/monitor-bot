@@ -2,8 +2,8 @@ name: BTC Decision System Daily Report
 
 on:
   schedule:
-    # Run twice a day: 00:00 and 12:00 UTC
-    - cron: '0 0,12 * * *'
+    # Run twice a day: 00:12 and 12:12 UTC (avoid congestion)
+    - cron: '12 0,12 * * *'
   workflow_dispatch:
 
 jobs:
