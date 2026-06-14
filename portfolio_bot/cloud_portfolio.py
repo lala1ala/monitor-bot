@@ -57,7 +57,14 @@ class ProxyManager:
                     if resp.status_code == 200:
                         lines = resp.text.splitlines()
                         for line in lines[:100]: # Increase to top 100
-                            if ':' in line: found.add(f"http://{line.strip()}")
+                            parts = line.strip().split(':')
+                            if len(parts) >= 2:
+                                ip = parts[0].strip()
+                                # Clean port part (remove extra suffix/country info)
+                                port_part = parts[1].strip().split()[0]
+                                port = ''.join([c for c in port_part if c.isdigit()])
+                                if ip and port:
+                                    found.add(f"http://{ip}:{port}")
                 except: continue
                     
             self.proxies = list(found)
@@ -151,17 +158,16 @@ async def fetch_ccxt_balance(exchange_id, credentials):
         success = await get_bal(type_opts)
         if success: return
 
-        # 2. If binance failed, try Public Proxies rotation
-        if exchange_id == 'binance':
-            logger.info("Direct/Private connection failed, trying public proxies...")
-            for _ in range(1): # Reduced to 1 retry
-                pub_proxy = proxy_mgr.get_next()
-                if not pub_proxy: break
-                
-                success = await get_bal(type_opts, use_proxy=pub_proxy)
-                if success: 
-                    logger.info(f"Success with public proxy")
-                    return
+        # 2. Try Public Proxies rotation fallback (both Binance and Gate)
+        logger.info(f"{exchange_id} direct/private connection failed, trying public proxies...")
+        for _ in range(10): # Try up to 10 proxies
+            pub_proxy = proxy_mgr.get_next()
+            if not pub_proxy: break
+            
+            success = await get_bal(type_opts, use_proxy=pub_proxy)
+            if success: 
+                logger.info(f"Success with public proxy")
+                return
 
     # 1. Fetch Spot
     await attempt_fetch({})
@@ -169,7 +175,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
     # 2. Fetch Futures
     if exchange_id == 'binance':
         await attempt_fetch({'defaultType': 'future'})
-    elif exchange_id == 'gateio':
+    elif exchange_id == 'gate':
         await attempt_fetch({'defaultType': 'swap'})
         
     return holdings
@@ -337,7 +343,7 @@ async def get_prices_with_history(symbols):
     missing = [s for s in targets if s not in results]
     if missing:
         logger.info(f"Checking Gate.io for {len(missing)} missing coins: {missing}")
-        await fetch_prices_from_exchange('gateio', missing)
+        await fetch_prices_from_exchange('gate', missing)
         
     # Add Stables
     results['USDT'] = {'current': 1.0, 'max_30m': 1.0}
@@ -354,7 +360,7 @@ async def run_scan(force_report=False):
     
     # 1. Fetch ALL Holdings
     binance = await fetch_ccxt_balance('binance', CONFIG['BINANCE'])
-    gate = await fetch_ccxt_balance('gateio', CONFIG['GATE'])
+    gate = await fetch_ccxt_balance('gate', CONFIG['GATE'])
     hl = await asyncio.to_thread(fetch_hyperliquid_balance, CONFIG['HYPERLIQUID_WALLET'])
     
     all_coins = set(binance.keys()) | set(gate.keys()) | set(hl.keys())
@@ -462,7 +468,8 @@ async def run_scan(force_report=False):
         if FETCH_ERRORS:
             report_msg += f"\n⚠️ **抓取异常信息**:\n"
             for k, v in FETCH_ERRORS.items():
-                report_msg += f"• `{k}`: {v[:120]}\n"
+                clean_v = v.replace('`', "'").replace('*', '').replace('_', '-')
+                report_msg += f"• `{k}`: `{clean_v[:120]}`\n"
 
         report_msg += f"\n_扫描时间: {now.strftime('%H:%M')} (Beijing)_"
         
