@@ -81,6 +81,8 @@ class ProxyManager:
 
 proxy_mgr = ProxyManager()
 
+FETCH_ERRORS = {}
+
 # ==================== Data Fetching (Stateless) ====================
 def get_beijing_time():
     return datetime.utcnow() + timedelta(hours=8)
@@ -124,6 +126,8 @@ async def fetch_ccxt_balance(exchange_id, credentials):
                     holdings[symbol] = holdings.get(symbol, 0) + amount
             
             logger.info(f"{exchange_id} Positive Holdings: {holdings}") # Debugging
+            if key in FETCH_ERRORS:
+                del FETCH_ERRORS[key]
             return True
                         
         except Exception as e:
@@ -132,6 +136,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
                 logger.warning(f"⚠️ {exchange_id} API key does not have futures (swap) permission, skipping futures balance.")
             else:
                 logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {e}")
+                FETCH_ERRORS[key] = f"proxy={use_proxy or CONFIG['PROXY_URL']}: {err_msg}"
             return False
         finally:
             if exchange:
@@ -199,10 +204,16 @@ def fetch_hyperliquid_balance(wallet):
                 sze = float(p.get('sze', 0))
                 if sze != 0:
                     holdings[coin] = holdings.get(coin, 0) + sze
+            if 'hyperliquid_perps' in FETCH_ERRORS:
+                del FETCH_ERRORS['hyperliquid_perps']
         else:
+            err_msg = f"API returned status {resp.status_code}"
             logger.error(f"Hyperliquid perps API returned status {resp.status_code}")
+            FETCH_ERRORS['hyperliquid_perps'] = err_msg
     except Exception as e:
+        err_msg = str(e)
         logger.error(f"Error fetching Hyperliquid perps: {e}")
+        FETCH_ERRORS['hyperliquid_perps'] = err_msg
 
     # 2. Fetch Spot clearinghouse state
     try:
@@ -215,10 +226,16 @@ def fetch_hyperliquid_balance(wallet):
                 total_amt = float(b.get('total', 0))
                 if total_amt > 0:
                     holdings[coin] = holdings.get(coin, 0) + total_amt
+            if 'hyperliquid_spot' in FETCH_ERRORS:
+                del FETCH_ERRORS['hyperliquid_spot']
         else:
+            err_msg = f"API returned status {resp.status_code}"
             logger.error(f"Hyperliquid spot API returned status {resp.status_code}")
+            FETCH_ERRORS['hyperliquid_spot'] = err_msg
     except Exception as e:
+        err_msg = str(e)
         logger.error(f"Error fetching Hyperliquid spot: {e}")
+        FETCH_ERRORS['hyperliquid_spot'] = err_msg
         
     return holdings
 
@@ -441,6 +458,11 @@ async def run_scan(force_report=False):
             qty_fmt = "{:,.4f}" if item['amt'] < 1000 else "{:,.2f}"
             report_msg += f"{item['icon']} **{item['coin']}**: {qty_fmt.format(item['amt'])} (${item['val']:,.0f})\n"
             
+        if FETCH_ERRORS:
+            report_msg += f"\n⚠️ **抓取异常信息**:\n"
+            for k, v in FETCH_ERRORS.items():
+                report_msg += f"• `{k}`: {v[:120]}\n"
+
         report_msg += f"\n_扫描时间: {now.strftime('%H:%M')} (Beijing)_"
         
         # Avoid duplicate report if alert already sent? No, user wants report.
