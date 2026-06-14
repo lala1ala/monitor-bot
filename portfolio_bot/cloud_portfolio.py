@@ -96,6 +96,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
     
     async def get_bal(options={}, use_proxy=None):
         exchange = None
+        key = f"{exchange_id}_{options.get('defaultType', 'spot')}"
         try:
             exchange_class = getattr(ccxt, exchange_id)
             
