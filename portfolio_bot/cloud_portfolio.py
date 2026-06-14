@@ -104,7 +104,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
             # 1. Private Proxy / Explicit Proxy
             if use_proxy:
                 ex_config['aiohttp_proxy'] = use_proxy
-            elif CONFIG['PROXY_URL'] and exchange_id == 'binance':
+            elif CONFIG['PROXY_URL']:
                  ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
 
             # Create new instance for each type to avoid state issues
@@ -169,30 +169,58 @@ async def fetch_ccxt_balance(exchange_id, credentials):
     return holdings
 
 def fetch_hyperliquid_balance(wallet):
-    """Fetch Hyperliquid account value via REST"""
+    """Fetch Hyperliquid account value via REST (Spot + Perps)"""
     if not wallet: return {}
-    try:
-        url = 'https://api.hyperliquid.xyz/info'
-        # Get Account Value (USDC)
-        resp = requests.post(url, json={'type': 'clearinghouseState', 'user': wallet}, timeout=10)
-        if resp.status_code != 200: return {}
-        data = resp.json()
-        margin_summary = data.get('marginSummary', {})
-        account_val = float(margin_summary.get('accountValue', 0))
+    
+    holdings = {}
+    proxies = None
+    if CONFIG['PROXY_URL']:
+        proxies = {
+            'http': CONFIG['PROXY_URL'],
+            'https': CONFIG['PROXY_URL']
+        }
         
-        # Get Assets for alert checking
-        holdings = {'USDC (HL)': account_val} 
-        positions = data.get('assetPositions', [])
-        for pos in positions:
-            p = pos.get('position', {})
-            coin = p.get('coin')
-            sze = float(p.get('sze', 0))
-            if sze != 0: holdings[coin] = sze
-            
-        return holdings
+    url = 'https://api.hyperliquid.xyz/info'
+    
+    # 1. Fetch Perp clearinghouse state
+    try:
+        resp = requests.post(url, json={'type': 'clearinghouseState', 'user': wallet}, proxies=proxies, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            margin_summary = data.get('marginSummary', {})
+            account_val = float(margin_summary.get('accountValue', 0))
+            if account_val > 0:
+                holdings['USDC (HL)'] = account_val
+                
+            positions = data.get('assetPositions', [])
+            for pos in positions:
+                p = pos.get('position', {})
+                coin = p.get('coin')
+                sze = float(p.get('sze', 0))
+                if sze != 0:
+                    holdings[coin] = holdings.get(coin, 0) + sze
+        else:
+            logger.error(f"Hyperliquid perps API returned status {resp.status_code}")
     except Exception as e:
-        logger.error(f"Error fetching Hyperliquid: {e}")
-        return {}
+        logger.error(f"Error fetching Hyperliquid perps: {e}")
+
+    # 2. Fetch Spot clearinghouse state
+    try:
+        resp = requests.post(url, json={'type': 'spotClearinghouseState', 'user': wallet}, proxies=proxies, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            balances = data.get('balances', [])
+            for b in balances:
+                coin = b.get('coin')
+                total_amt = float(b.get('total', 0))
+                if total_amt > 0:
+                    holdings[coin] = holdings.get(coin, 0) + total_amt
+        else:
+            logger.error(f"Hyperliquid spot API returned status {resp.status_code}")
+    except Exception as e:
+        logger.error(f"Error fetching Hyperliquid spot: {e}")
+        
+    return holdings
 
 async def get_prices_with_history(symbols):
     """
@@ -368,11 +396,7 @@ async def run_scan(force_report=False):
         
     # Condition B: Send Periodic Report (Every 4 hours)
     now = get_beijing_time()
-    # Run every 20 minutes, but report only every 4 hours (0, 4, 8, 12, 16, 20)
-    # Restrict to first run of the hour (minute < 25) to prevent duplicates
-    is_periodic_time = (now.hour % 4 == 0) and (now.minute < 25)
-    
-    if force_report or is_periodic_time:
+    if force_report:
         report_msg = f"📊 **持仓监控报告**\n"
         report_msg += f"💰 **总资产: ${portfolio_total:.2f}**\n"
         report_msg += f"---\n"

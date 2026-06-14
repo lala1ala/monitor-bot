@@ -90,27 +90,30 @@ class DataFetcher:
             print(f"Error fetching F&G: {e}")
             return None
 
-    def get_coinalyze_funding(self, symbols=None):
-        """Fetch Predicted Funding Rate(s) from Coinalyze"""
-        url = f"https://api.coinalyze.net/v1/predicted-funding-rate"
+    def get_coinalyze_funding(self, symbols):
+        """Fetch predicted funding rates (Deprecated)"""
+        url = "https://api.coinalyze.net/v1/predicted-funding-rate"
         try:
-            if symbols:
-                # Batch request
-                params = {"symbols": symbols}
-                resp = requests.get(url, params=params, headers=self.coinalyze_headers, timeout=10)
-                if resp.status_code == 200:
-                    return resp.json()
-            else:
-                # Default candidates loop
-                candidates = ["BTCUSDT.A", "BTCUSDT_PERP.A", "BTC-PERP.A", "BTCUSDT.6"]
-                for sym in candidates:
-                    resp = requests.get(url, params={"symbols": sym}, headers=self.coinalyze_headers, timeout=10)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data: return data
-                return None
+            params = {"symbols": symbols}
+            resp = requests.get(url, params=params, headers=self.coinalyze_headers, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+            return None
         except Exception as e:
-            print(f"Error fetching Funding Rate: {e}")
+            print(f"Error fetching Predicted Funding: {e}")
+            return None
+
+    def get_coinalyze_current_funding(self, symbols):
+        """Fetch CURRENT funding rates"""
+        url = "https://api.coinalyze.net/v1/funding-rate"
+        try:
+            params = {"symbols": symbols}
+            resp = requests.get(url, params=params, headers=self.coinalyze_headers, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+        except Exception as e:
+            print(f"Error fetching Current Funding: {e}")
             return None
 
     def get_future_markets(self):
@@ -169,6 +172,58 @@ class DataFetcher:
             print(f"Error fetching Coinalyze OI: {e}")
             return []
 
+    def get_all_open_interest(self, markets):
+        """Fetch Open Interest for ALL markets in batches"""
+        if not markets:
+            return {}
+            
+        all_oi_data = {}
+        # Batch size 100 (Max allowed by API is often higher, but 100 is safe)
+        batch_size = 100
+        symbols = [m['symbol'] for m in markets]
+        
+        print(f"Fetching OI for {len(symbols)} markets (~{len(symbols)//batch_size + 1} requests)...")
+        print("Note: Throttling to avoid rate limits (approx 1 min total).")
+        
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i+batch_size]
+            try:
+                url = f"https://api.coinalyze.net/v1/open-interest"
+                symbols_str = ",".join(batch)
+                params = {"symbols": symbols_str}
+                
+                # Retry logic
+                for attempt in range(3):
+                    try:
+                        resp = requests.get(url, params=params, headers=self.coinalyze_headers, timeout=20)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data:
+                                for item in data:
+                                    all_oi_data[item['symbol']] = float(item.get('value', 0))
+                            break # Success
+                        elif resp.status_code == 429:
+                            wait = float(resp.headers.get('Retry-After', 5)) + 1
+                            print(f"Rate limit hit. Waiting {wait:.1f}s...")
+                            time.sleep(wait)
+                            continue
+                        else:
+                            print(f"Batch Error: {resp.status_code}")
+                            break
+                    except Exception as err:
+                        print(f"Batch Exception: {err}")
+                        time.sleep(1)
+                
+                # Coinalyze Rate Limit: 40 requests per minute
+                # 60s / 40 = 1.5s per request.
+                # We sleep 1.6s to be safe and avoid hitting 429.
+                time.sleep(1.6)
+                
+            except Exception as e:
+                print(f"Error in batch {i}: {e}")
+                
+        return all_oi_data
+
     def get_coinglass_sth_price(self):
         """Fetch STH Realized Price"""
         # Endpoint: https://open-api-v4.coinglass.com/api/index/bitcoin-sth-realized-price (guess based on slug)
@@ -226,16 +281,13 @@ class BtcMonitor:
     def __init__(self):
         self.fetcher = DataFetcher()
 
-    def run(self):
-
-        print("Gathering Data...")
+    def job(self):
+        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting Job...")
         
         # 1. Market Heat (Binance Volume) & Price
         binance_data = self.fetcher.get_binance_ticker_24hr()
         current_btc_price = 0
         hot_alts = []
-        binance_price_map = {}
-        binance_vol_map = {}
         
         if binance_data:
             sorted_vol = sorted(binance_data, key=lambda x: float(x['quoteVolume']), reverse=True)
@@ -243,11 +295,11 @@ class BtcMonitor:
             btc_vol = float(btc_item['quoteVolume']) if btc_item else 0
             current_btc_price = float(btc_item['lastPrice']) if btc_item else 0
         
-        if current_btc_price == 0:
-            print("Warning: BTC Price is 0. Attempting fallback...")
-            current_btc_price = self.fetcher.get_btc_price_fallback()
-            print(f"Fallback BTC Price: {current_btc_price}")
-            
+            if current_btc_price == 0:
+                print("Warning: BTC Price is 0. Attempting fallback...")
+                current_btc_price = self.fetcher.get_btc_price_fallback()
+                
+            # Hot Alts Logic
             for x in sorted_vol[:10]:
                 sym = x['symbol']
                 if sym in ['BTCUSDT', 'ETHUSDT', 'USDCUSDT', 'FDUSDUSDT']: continue
@@ -255,126 +307,71 @@ class BtcMonitor:
                 ratio_btc = vol / btc_vol if btc_vol > 0 else 0
                 if ratio_btc > VOLUME_SPIKE_THRESHOLD:
                     hot_alts.append(f"**{sym}** Vol: ${vol/1e9:.2f}B ({ratio_btc*100:.0f}% of BTC)")
-        
+        else:
+             print("Warning: Binance data fetch failed. Using fallback for BTC Price.")
+             current_btc_price = self.fetcher.get_btc_price_fallback()
+
         # 2. Speculation Heat (Coinalyze Aggregation)
         print("Fetching OI and Funding from Coinalyze...")
-        all_markets = self.fetcher.get_future_markets()
+        all_markets_raw = self.fetcher.get_future_markets()
         
-        # Track units and values
-        btc_units = 0
-        eth_units = 0
+        # Top Exchanges: Binance(A, 6), Bybit(4?), OKX(3?)
+        # Codes from analysis: A, 6, 4, 3 are the biggest.
+        # This covers approx 90% of market open interest and avoids rate limits.
+        TOP_EXCHANGES = ['A', '6', '4', '3']
+        
+        all_markets = [m for m in all_markets_raw if m.get('exchange') in TOP_EXCHANGES] if all_markets_raw else []
+        
+        btc_oi_usd = 0
+        eth_oi_usd = 0
+        total_market_oi_usd = 0
         alts_usd = 0
         
-        btc_funding_list = []
+        funding_annual = 0
+        funding_annual_str = "N/A"
         
         if all_markets:
-            print(f"Total Coinalyze markets: {len(all_markets)}")
-            perpetuals = [m for m in all_markets if m.get('is_perpetual')]
-            
-            # Top Exchanges: Binance(A, 6), Bybit(4), OKX(3)
-            # This covers approx 90% of market open interest.
-            TOP_EXCHANGES = ['A', '6', '4', '3']
-            def is_top_tier(m):
-                return m.get('exchange') in TOP_EXCHANGES
+            print(f"Total Markets: {len(all_markets_raw)}. Filtered (Top Exchanges): {len(all_markets)}")
 
-            # Group symbols (Filtered)
-            btc_perps = [m['symbol'] for m in perpetuals if m.get('base_asset') == 'BTC' and is_top_tier(m)]
-            eth_perps = [m['symbol'] for m in perpetuals if m.get('base_asset') == 'ETH' and is_top_tier(m)]
             
-            # For Alts, we take the top 100 by Binance volume to estimate "All Alts"
-            binance_vol_map = {item['symbol']: float(item['quoteVolume']) for item in binance_data} if binance_data else {}
-            binance_price_map = {item['symbol']: float(item['lastPrice']) for item in binance_data} if binance_data else {}
+            # Fetch OI for ALL markets
+            all_oi_map = self.fetcher.get_all_open_interest(all_markets)
             
-            other_perps = []
-            for m in perpetuals:
-                if not is_top_tier(m): continue # Skip small exchanges
+            # Sum up
+            total_market_oi_usd = sum(all_oi_map.values())
+            
+            # Filter for BTC/ETH
+            for m in all_markets:
+                sym = m['symbol']
+                base = m.get('base_asset', '')
+                oi = all_oi_map.get(sym, 0)
                 
-                base = m.get('base_asset')
-                if base in ['BTC', 'ETH']: continue
-                
-                exch_sym = m.get('symbol_on_exchange', '')
-                vol = binance_vol_map.get(exch_sym, 0)
-                if vol > 0:
-                    other_perps.append({"symbol": m['symbol'], "vol": vol, "exch_sym": exch_sym})
+                if base == 'BTC':
+                    btc_oi_usd += oi
+                elif base == 'ETH':
+                    eth_oi_usd += oi
             
-            # Sort and take top 30 alts (Reduced from 100 to avoid Rate Limits)
-            other_perps.sort(key=lambda x: x['vol'], reverse=True)
-            top_alts = other_perps[:30]
-            alt_symbols = [x['symbol'] for x in top_alts]
+            alts_usd = total_market_oi_usd - btc_oi_usd - eth_oi_usd
+            alts_oi_share = (alts_usd / total_market_oi_usd * 100) if total_market_oi_usd > 0 else 0
             
-            # Fetch Data in Batches
-            # 1. BTC Totals
-            print(f"Fetching {len(btc_perps)} BTC perpetuals...")
-            for i in range(0, len(btc_perps), 100):
-                batch = btc_perps[i:i+100]
-                resp = self.fetcher.get_coinalyze_oi(batch)
-                if resp:
-                    for item in resp: btc_units += float(item.get('value', 0))
-                time.sleep(1.0)
+            # BTC Funding (Weighted or Simple Average of top BTC perps)
+            # Find top BTC perps by OI
+            btc_markets = [m for m in all_markets if m.get('base_asset') == 'BTC' and m.get('is_perpetual')]
+            btc_markets.sort(key=lambda x: all_oi_map.get(x['symbol'], 0), reverse=True)
+            top_btc_syms = [m['symbol'] for m in btc_markets[:10]]
             
-            # 2. ETH Totals
-            print(f"Fetching {len(eth_perps)} ETH perpetuals...")
-            for i in range(0, len(eth_perps), 100):
-                batch = eth_perps[i:i+100]
-                resp = self.fetcher.get_coinalyze_oi(batch)
-                if resp:
-                    for item in resp: eth_units += float(item.get('value', 0))
-                time.sleep(1.0)
-            
-            # 3. Alts Totals (Estimated via top 30)
-            # Fetch for Alts and calculate USD immediately using Binance prices
-            print(f"Fetching {len(alt_symbols)} Top Alt perpetuals...")
-            # Single batch of 30 should be safe
-            for i in range(0, len(alt_symbols), 50):
-                batch = alt_symbols[i:i+50]
-                resp = self.fetcher.get_coinalyze_oi(batch)
-                if resp:
-                    for item in resp:
-                        sym = item.get('symbol', '')
-                        units = float(item.get('value', 0))
-                        # Match back to binance price
-                        # value is already USD
-                        alts_usd += units
-                time.sleep(1.0)
-
-            # 4. BTC Funding Average (Predicted)
-            # Use top 10 BTC perps to get a good average
-            top_btc_for_fund = btc_perps[:10]
-            fund_resp = self.fetcher.get_coinalyze_funding(",".join(top_btc_for_fund))
-            if fund_resp:
-                for f_item in fund_resp:
-                    # 'value' is likely the predicted funding rate in percentage (e.g. 0.01 for 0.01%)
-                    pf = float(f_item.get('value', 0))
-                    btc_funding_list.append(pf)
-            else:
-                pass
-
-        # Final Aggregation
-        # Coinalyze 'value' is already in USD (Open Interest in USD)
-        # So we just sum them up directly.
-        btc_oi_usd = btc_units 
-        eth_oi_usd = eth_units 
+            if top_btc_syms:
+                fund_resp = self.fetcher.get_coinalyze_current_funding(",".join(top_btc_syms))
+                if fund_resp:
+                    vals = [float(x.get('value', 0)) for x in fund_resp]
+                    if vals:
+                        avg_pf = sum(vals) / len(vals)
+                        funding_annual = avg_pf * 3 * 365 * 100
+                        funding_annual_str = f"{funding_annual:+.2f}%"
         
-        # Alts USD was calculated in the loop:
-        # units * price. Wait, if 'value' is USD, then alts_usd logic was also wrong?
-        # Let's check alts loop.
-        # "units = float(item.get('value', 0))" -> this is USD.
-        # "alts_usd += (units * price)" -> WRONG. It should be just units if it's USD.
-        # BUT Coinalyze 'value' for linear perps IS usually USD.
-        # However, for inverse perps, it might be contracts?
-        # Per Coinalyze API, 'value' is "Open Interest in USD".
-        # So we should NOT multiply by price anywhere.
-        
-        total_market_oi_usd = btc_oi_usd + eth_oi_usd + alts_usd
-        alts_oi_share = (alts_usd / total_market_oi_usd * 100) if total_market_oi_usd > 0 else 0
-        
-        # Funding Average
-        funding_annual_str = "N/A"
-        funding_annual = 0
-        if btc_funding_list:
-            avg_pf = sum(btc_funding_list) / len(btc_funding_list)
-            funding_annual = avg_pf * 3 * 365 * 100
-            funding_annual_str = f"{funding_annual:+.2f}%"
+        else:
+            print("Error: Could not fetch markets from Coinalyze.")
+            alts_oi_share = 0
 
         oi_status = "Healthy"
         if alts_oi_share > (ALTS_OI_REL_THRESHOLD * 100):
@@ -405,6 +402,7 @@ class BtcMonitor:
                         f"**Fear & Greed**: {fg_str}\n"
                         f"**Funding Rate (Annual)**: {funding_annual_str}\n"
                         f"**Open Interest (OI)**:\n"
+                        f" • Total: ${total_market_oi_usd/1e9:.1f}B\n"
                         f" • BTC: ${btc_oi_usd/1e9:.1f}B\n"
                         f" • ETH: ${eth_oi_usd/1e9:.1f}B\n"
                         f" • Alts: ${alts_usd/1e9:.1f}B ({oi_status})"
@@ -438,6 +436,22 @@ class BtcMonitor:
             resp.raise_for_status()
         except requests.exceptions.HTTPError as err:
              print(f"Discord Send Error: {err.response.text}")
+        except Exception as e:
+             print(f"Discord Send Error: {e}")
+
+    def start(self):
+        print("Starting BTC Monitor Loop (Every 12 hours)...")
+        while True:
+            try:
+                self.job()
+            except Exception as e:
+                print(f"Job failed with error: {e}")
+            
+            print("Sleeping for 12 hours...")
+            time.sleep(12 * 3600)  # 12 hours
 
 if __name__ == "__main__":
-    BtcMonitor().run()
+    monitor = BtcMonitor()
+    # If users wants to run immediately, they can just run it. 
+    # But for deployment, we use start() loop.
+    monitor.start()

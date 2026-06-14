@@ -2,7 +2,8 @@ name: Portfolio Monitor
 
 on:
   schedule:
-    - cron: '10,30,50 * * * *'   # Runs every 20 minutes (non-congested)
+    - cron: '10,30,50 * * * *'   # Runs every 20 minutes for alert checking
+    - cron: '0 0,4,8,12,16,20 * * *' # Runs every 4 hours for periodic report
   workflow_dispatch:        # Allows manual run button
 
 jobs:
@@ -32,8 +33,8 @@ jobs:
           HYPERLIQUID_WALLET: ${{ secrets.HYPERLIQUID_WALLET }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
-          # If manually triggered, passed --report flag to force send report
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          # If manually triggered or triggered by the 4-hour report cron, pass the --report flag
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] || [ "${{ github.event.schedule }}" == "0 0,4,8,12,16,20 * * *" ]; then
             python -u portfolio_bot/cloud_portfolio.py --report
           else
             python -u portfolio_bot/cloud_portfolio.py
