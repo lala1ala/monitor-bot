@@ -5,11 +5,22 @@ import time
 from datetime import datetime
 
 # ==================== CONFIGURATION ====================
-# API Keys
-# Use 'or' to fallback if the env var is set but empty (e.g. GHA empty secret)
-COINGLASS_API_KEY = os.environ.get("COINGLASS_SECRET") or "438d3e0c3aaa4fdd9caa5d7853e41cb3"
-COINALYZE_API_KEY = os.environ.get("COINALYZE_KEY") or "af1e3712-4a26-4293-bba4-579f6b736daa"
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL") or "https://discord.com/api/webhooks/1469265206646542348/cBUvNdqBZgji_AY7huzVjVbQ-XEkDAL3A0Z1snmdc2IEaFFN5yAxenAgrEuqaIVPllme"
+# API Keys —— 一律从环境变量 / GitHub Secrets 读取，源码里不留任何真实凭据。
+#
+# 安全约定：公开仓库中绝不能用真实凭据作为"兜底默认值"。
+# 因为仓库是公开的，兜底值就等于公开值 —— git 历史里能翻出来，Actions 日志里也可能被打印。
+# 未配置时返回空字符串并告警，让对应功能自然降级，而不是把凭据泄出去。
+def _env(name, hint=""):
+    """从环境变量读取配置；缺失时返回空串并打印警告（不阻断运行）。"""
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        print(f"[warn] 环境变量 {name} 未配置，相关功能将不可用。{hint}")
+    return value
+
+
+COINGLASS_API_KEY = _env("COINGLASS_SECRET", "(Coinglass 指标为可选项)")
+COINALYZE_API_KEY = _env("COINALYZE_KEY", "(Coinalyze 资金费率/持仓数据需要此变量)")
+DISCORD_WEBHOOK_URL = _env("DISCORD_WEBHOOK_URL", "(未配置则不会推送 Discord 通知)")
 
 # Thresholds
 ALTS_OI_REL_THRESHOLD = 0.55  # Warning if Alts OI > 55% of Total
@@ -427,6 +438,9 @@ class BtcMonitor:
         print("Report sent!")
 
     def send_discord_embed(self, embed_data):
+        if not DISCORD_WEBHOOK_URL:
+            print("跳过 Discord 推送：未配置 DISCORD_WEBHOOK_URL 环境变量。")
+            return
         payload = {
             "username": "Antigravity BTC Monitor",
             "embeds": [embed_data]

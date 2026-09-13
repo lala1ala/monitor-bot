@@ -3,8 +3,12 @@ import json
 import requests
 import os
 
-api_key = os.environ.get("COINALYZE_KEY") or "af1e3712-4a26-4293-bba4-579f6b736daa"
-print(f"Using API Key: {api_key}")
+# 调试脚本同样不硬编码凭据，也绝不把密钥打印出来
+# （公开仓库的 Actions 日志是任何人都能看到的）
+api_key = (os.environ.get("COINALYZE_KEY") or "").strip()
+if not api_key:
+    raise SystemExit("请先设置环境变量 COINALYZE_KEY（不要在源码里写死凭据）。")
+print("Using COINALYZE_KEY from environment (value hidden).")
 
 def test_endpoint(name, url, params=None):
     print(f"\n--- Testing {name} ---")

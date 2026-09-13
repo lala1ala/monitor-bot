@@ -6,15 +6,25 @@ on:
     - cron: '12 0,12 * * *'
   workflow_dispatch:
 
+# 最小权限：只读取代码
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor-bot-btc-daily
+  cancel-in-progress: false
+
 jobs:
   daily-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
@@ -24,6 +34,7 @@ jobs:
 
       - name: Run BTC Monitor
         env:
+          # 全部凭据只从 Secrets 注入，源码里不再有任何兜底默认值
           COINGLASS_SECRET: ${{ secrets.COINGLASS_SECRET }}
           COINALYZE_KEY: ${{ secrets.COINALYZE_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

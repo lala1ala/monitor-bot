@@ -5,7 +5,10 @@ import os
 
 def final_debug():
     # Detect the key
-    key = os.getenv('COINALYZE_KEY', 'af1e3712-4a26-4293-bba4-579f6b736daa').strip()
+    # 不硬编码凭据：缺失时直接退出并给出可操作的提示
+    key = (os.getenv('COINALYZE_KEY') or '').strip()
+    if not key:
+        raise SystemExit("请先设置环境变量 COINALYZE_KEY（不要在源码里写死凭据）。")
     
     symbols = "BTCUSDT_PERP.A,ETHUSDT_PERP.A"
     

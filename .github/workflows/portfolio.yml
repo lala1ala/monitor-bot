@@ -6,22 +6,33 @@ on:
     - cron: '0 0,4,8,12,16,20 * * *' # Runs every 4 hours for periodic report
   workflow_dispatch:        # Allows manual run button
 
+# 最小权限：只读取代码
+permissions:
+  contents: read
+
+# 防止 20 分钟一次的高频调度出现实例重叠
+concurrency:
+  group: monitor-bot-portfolio
+  cancel-in-progress: false
+
 jobs:
   check-portfolio:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
       - name: Install dependencies
         run: |
           pip install requests ccxt
-          
+
       - name: Run Monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.PORTFOLIO_BOT_TOKEN }}
@@ -32,6 +43,7 @@ jobs:
           GATE_SECRET: ${{ secrets.GATE_SECRET }}
           HYPERLIQUID_WALLET: ${{ secrets.HYPERLIQUID_WALLET }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
+          PYTHONUNBUFFERED: "1"
         run: |
           # If manually triggered or triggered by the 4-hour report cron, pass the --report flag
           if [ "${{ github.event_name }}" == "workflow_dispatch" ] || [ "${{ github.event.schedule }}" == "0 0,4,8,12,16,20 * * *" ]; then
