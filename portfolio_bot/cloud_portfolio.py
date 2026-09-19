@@ -53,7 +53,7 @@ class ProxyManager:
             found = set()
             for url in sources:
                 try:
-                    resp = requests.get(url, timeout=2) # Reduced timeout
+                    resp = requests.get(url, timeout=5) # was 2s, too tight
                     if resp.status_code == 200:
                         lines = resp.text.splitlines()
                         for line in lines[:100]: # Increase to top 100
@@ -109,7 +109,7 @@ async def fetch_ccxt_balance(exchange_id, credentials):
             
             # Prepare config
             ex_config = credentials.copy()
-            ex_config['timeout'] = 3000 # 3s timeout (was 10s)
+            ex_config['timeout'] = 20000 # 20s timeout (was 3s, too tight for cold-start TLS)
             
             # 1. Private Proxy / Explicit Proxy
             if use_proxy:
@@ -143,8 +143,8 @@ async def fetch_ccxt_balance(exchange_id, credentials):
             if "futures permission" in err_msg or "FORBIDDEN" in err_msg:
                 logger.warning(f"⚠️ {exchange_id} API key does not have futures (swap) permission, skipping futures balance.")
             else:
-                logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {e}")
-                FETCH_ERRORS[key] = f"proxy={use_proxy or CONFIG['PROXY_URL']}: {err_msg}"
+                logger.error(f"Error fetching {exchange_id} (proxy={use_proxy}): {type(e).__name__}: {e}")
+                FETCH_ERRORS[key] = f"{type(e).__name__} proxy={use_proxy or CONFIG['PROXY_URL']}: {err_msg}"
             return False
         finally:
             if exchange:
@@ -264,7 +264,7 @@ async def get_prices_with_history(symbols):
         if not symbols_to_fetch: return
         
         ex_config = {}
-        ex_config['timeout'] = 3000 # 3s timeout
+        ex_config['timeout'] = 20000 # 20s timeout (was 3s)
         if use_proxy: ex_config['aiohttp_proxy'] = use_proxy
         elif CONFIG['PROXY_URL']: ex_config['aiohttp_proxy'] = CONFIG['PROXY_URL']
         
