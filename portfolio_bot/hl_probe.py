@@ -128,6 +128,58 @@ def main():
     if acct_val > 0 and len(spot_bal) <= 1 and not evm_escrow:
         print('[probe] 判定: 该地址现货确实没有其他币 → 你看到的其他币种在另一个地址/账户')
 
+    # ---------- 7. 定价验证：复刻 cloud_portfolio 的两段式取价 ----------
+    # allMids 缺价的币 → spotMeta 映射 pair → l2Book 中间价
+    st, txt = call('allMids', {})
+    mids = json.loads(txt) if st == 200 else {}
+    st2, txt2 = call('spotMeta', {})
+    pairmap = {}
+    if st2 == 200:
+        meta = json.loads(txt2)
+        tok = {t['index']: t['name'] for t in meta.get('tokens', [])}
+        STABLE = ('USDC', 'USDH', 'USDT0', 'USDE')
+        for u in meta.get('universe', []):
+            ids = u.get('tokens') or []
+            if len(ids) != 2:
+                continue
+            b, q = tok.get(ids[0]), tok.get(ids[1])
+            if not b or q not in STABLE:
+                continue
+            prev = pairmap.get(b)
+            if prev is None or (q == 'USDC' and prev[1] != 'USDC'):
+                pairmap[b] = (u.get('name'), q)
+
+    STABLE_COINS = ('USDC', 'USDH', 'USDT', 'USDE', 'USDT0')
+    total = 0.0
+    print('[probe] ---- 定价（新逻辑）----')
+    for b in spot_bal:
+        coin = b.get('coin')
+        amt = float(b.get('total', 0) or 0)
+        px, src = 0.0, '无价'
+        if coin in STABLE_COINS:
+            px, src = 1.0, '稳定币'
+        elif coin in mids:
+            try:
+                px, src = float(mids[coin]), 'allMids'
+            except Exception:
+                pass
+        elif coin in pairmap:
+            st3, txt3 = call('l2Book', {'coin': pairmap[coin][0]})
+            if st3 == 200:
+                lv = json.loads(txt3).get('levels') or [[], []]
+                bb = float(lv[0][0]['px']) if lv[0] else None
+                ba = float(lv[1][0]['px']) if lv[1] else None
+                if bb and ba:
+                    px, src = (bb + ba) / 2, f'l2Book {pairmap[coin][0]}'
+                elif bb:
+                    px, src = bb, f'l2Book {pairmap[coin][0]}'
+        val = amt * px
+        total += val
+        print(f'[probe]   {coin:8s} {amt:>18.8f} × {px:>14.6f} = ${val:>12,.2f}  [{src}]')
+    print(f'[probe] HL 现货总值（新逻辑）= ${total:,.2f}')
+    print(f'[probe] 对照：旧逻辑只算到 USDC ≈ '
+          f'${sum(float(b.get("total", 0) or 0) for b in spot_bal if b.get("coin") == "USDC"):,.2f}')
+
 
 if __name__ == '__main__':
     main()
