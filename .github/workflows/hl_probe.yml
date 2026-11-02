@@ -1,0 +1,29 @@
+name: HL Probe
+
+# 一次性诊断用：只查 Hyperliquid 余额，不碰币安/Gate，几十秒结束。
+# 用完可以删。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Probe HL
+        env:
+          HYPERLIQUID_WALLET: ${{ secrets.HYPERLIQUID_WALLET }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: python -u portfolio_bot/hl_probe.py
