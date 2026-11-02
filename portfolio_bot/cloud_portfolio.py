@@ -257,7 +257,10 @@ def fetch_hyperliquid_balance(wallet):
         err_msg = str(e)
         logger.error(f"Error fetching Hyperliquid spot: {e}")
         FETCH_ERRORS['hyperliquid_spot'] = err_msg
-        
+
+    # 诊断日志（2026-11-02）：报告只发 TG、不打印，出了问题看不见读了什么
+    logger.info(f"[HL] 读到 {len(holdings)} 个 key：{sorted(holdings)}")
+    logger.info(f"[HL] 其中永续仓位 {len(perp_keys)} 个：{sorted(perp_keys)}")
     return holdings, perp_keys
 
 
@@ -291,6 +294,7 @@ def fetch_hyperliquid_mids():
                 out[k] = px
         if 'hyperliquid_mids' in FETCH_ERRORS:
             del FETCH_ERRORS['hyperliquid_mids']
+        logger.info(f"[HL] allMids 取到 {len(out)} 条报价")
         return out
     except Exception as e:
         FETCH_ERRORS['hyperliquid_mids'] = str(e)[:120]
@@ -556,6 +560,9 @@ async def run_scan(force_report=False):
         send_tg(report_msg)
 
 def send_tg(text):
+    # 2026-11-02：报告只进 TG，日志里看不到内容，排查「为什么某币没显示」时
+    # 完全没有依据。这里同步打一份到日志（私有仓库日志，仅自己可见）。
+    logger.info("===== 报告全文 =====\n" + text + "\n===== 报告结束 =====")
     if not CONFIG['TG_TOKEN'] or not CONFIG['TG_CHAT_ID']:
         enc = sys.stdout.encoding or 'utf-8'
         safe_text = text.encode(enc, errors='replace').decode(enc)
