@@ -181,10 +181,23 @@ async def fetch_ccxt_balance(exchange_id, credentials):
     return holdings
 
 def fetch_hyperliquid_balance(wallet):
-    """Fetch Hyperliquid account value via REST (Spot + Perps)"""
-    if not wallet: return {}
-    
+    """Fetch Hyperliquid account value via REST (Spot + Perps)
+
+    返回 (holdings, perp_keys)：
+      holdings  —— 展示用：现货余额 + 永续仓位 + 永续权益 'USDC (HL)'
+      perp_keys —— 其中属于「永续仓位名义价值」的币种，**不参与总值**
+
+    ★ 2026-11-02 修掉总值重复计算：永续账户的 accountValue 本身已经包含仓位的
+      浮动盈亏，原实现又把这批仓位的名义价值(sze × 价格)加进总值，等于同一笔钱
+      算两遍。现在总值只用 accountValue + 现货市值，仓位只做展示。
+
+    ⚠️ 已知局限：同一币同时有永续仓位和现货时，两者共用同一个 key，
+      perp_keys 会把现货那部分也排除在总值外（少见，先记在这里）。
+    """
+    if not wallet: return {}, set()
+
     holdings = {}
+    perp_keys = set()
     proxies = None
     if CONFIG['PROXY_URL']:
         proxies = {
@@ -211,6 +224,7 @@ def fetch_hyperliquid_balance(wallet):
                 sze = float(p.get('sze', 0))
                 if sze != 0:
                     holdings[coin] = holdings.get(coin, 0) + sze
+                    perp_keys.add(coin)
             if 'hyperliquid_perps' in FETCH_ERRORS:
                 del FETCH_ERRORS['hyperliquid_perps']
         else:
@@ -244,7 +258,45 @@ def fetch_hyperliquid_balance(wallet):
         logger.error(f"Error fetching Hyperliquid spot: {e}")
         FETCH_ERRORS['hyperliquid_spot'] = err_msg
         
-    return holdings
+    return holdings, perp_keys
+
+
+def fetch_hyperliquid_mids():
+    """Hyperliquid 自己的行情（allMids），用来给 HL 持仓定价。
+
+    为什么必须用它：HL 现货共 511 个币种，其中 475 个（93%）在币安没有 USDT
+    交易对。原来只从币安/Gate 抓价，这批币 price=0，被 `if val > 1.0` 判成
+    「没有价值」直接丢弃 —— 表现就是「HL 的其他币种余额没读取进来」。
+    allMids 一次请求返回全部永续+现货中间价（2026-11-02 实测 1423 条）。
+
+    ⚠️ USDC 不在 allMids 里，由调用方按 1.0 兜底。
+    """
+    proxies = None
+    if CONFIG['PROXY_URL']:
+        proxies = {'http': CONFIG['PROXY_URL'], 'https': CONFIG['PROXY_URL']}
+    try:
+        resp = requests.post('https://api.hyperliquid.xyz/info',
+                             json={'type': 'allMids'}, proxies=proxies, timeout=10)
+        if resp.status_code != 200:
+            FETCH_ERRORS['hyperliquid_mids'] = f"API returned status {resp.status_code}"
+            logger.error(f"Hyperliquid mids API returned status {resp.status_code}")
+            return {}
+        out = {}
+        for k, v in resp.json().items():
+            try:
+                px = float(v)
+            except (TypeError, ValueError):
+                continue
+            if px > 0:
+                out[k] = px
+        if 'hyperliquid_mids' in FETCH_ERRORS:
+            del FETCH_ERRORS['hyperliquid_mids']
+        return out
+    except Exception as e:
+        FETCH_ERRORS['hyperliquid_mids'] = str(e)[:120]
+        logger.error(f"Error fetching Hyperliquid mids: {e}")
+        return {}
+
 
 async def get_prices_with_history(symbols):
     """
@@ -361,27 +413,38 @@ async def run_scan(force_report=False):
     # 1. Fetch ALL Holdings
     binance = await fetch_ccxt_balance('binance', CONFIG['BINANCE'])
     gate = await fetch_ccxt_balance('gate', CONFIG['GATE'])
-    hl = await asyncio.to_thread(fetch_hyperliquid_balance, CONFIG['HYPERLIQUID_WALLET'])
-    
-    all_coins = set(binance.keys()) | set(gate.keys()) | set(hl.keys())
-    
+    hl, hl_perp_keys = await asyncio.to_thread(
+        fetch_hyperliquid_balance, CONFIG['HYPERLIQUID_WALLET'])
+    # HL 自己的行情：给 HL 持仓定价（币安只覆盖 HL 币种的 7%）
+    hl_mids = await asyncio.to_thread(fetch_hyperliquid_mids)
+
+    # 需要外所报价的币 = 币安/Gate 的币 + HL 里 HL 自己定不了价的币。
+    # HL 已能定价的不再拿去币安/Gate 试，省掉几百次注定失败的请求
+    # （2026-11-02 之前一次 run 光价格就跑了 4~21 分钟）。
+    all_coins = (set(binance.keys()) | set(gate.keys())
+                 | {c for c in hl.keys() if c != 'USDC (HL)' and c not in hl_mids})
+
     # 2. Get Pricing & Drops
     price_data = await get_prices_with_history(list(all_coins))
-    
+
     # 3. Calculate Portfolio Value
     portfolio_total = 0
     exchange_totals = {'Binance': 0, 'Gate': 0, 'Hyperliquid': 0}
-    
-    def calc_val(holdings, store_key):
+
+    def price_of(coin, local_prices=None):
+        """取价：HL 持仓优先用 HL 自己的 allMids，其余用币安/Gate。"""
+        p_key = 'USDC' if coin == 'USDC (HL)' else coin
+        if local_prices and p_key in local_prices:
+            return local_prices[p_key]
+        data = price_data.get(p_key)
+        return data['current'] if data else 0
+
+    def calc_val(holdings, store_key, local_prices=None, skip=()):
         val = 0
         for coin, amt in holdings.items():
-            # Handle special HL USDC
-            p_key = 'USDC' if coin == 'USDC (HL)' else coin
-            
-            # Fallback price 0 if missing
-            data = price_data.get(p_key)
-            price = data['current'] if data else 0
-            
+            if coin in skip:
+                continue
+            price = price_of(coin, local_prices)
             if price > 0:
                 val += amt * price
         exchange_totals[store_key] = val
@@ -389,7 +452,8 @@ async def run_scan(force_report=False):
 
     portfolio_total += calc_val(binance, 'Binance')
     portfolio_total += calc_val(gate, 'Gate')
-    portfolio_total += calc_val(hl, 'Hyperliquid')
+    # HL：用 HL 自己的行情定价；永续仓位只展示、不计入总值（避免与 accountValue 重复）
+    portfolio_total += calc_val(hl, 'Hyperliquid', hl_mids, skip=hl_perp_keys)
     
     # 4. Check Alerts (Drop > 2%)
     alerts = []
@@ -434,36 +498,51 @@ async def run_scan(force_report=False):
         # Aggregate all holdings for display
         all_holdings_list = []
         
-        def collect_details(holdings, source_icon):
+        def collect_details(holdings, source_icon, local_prices=None, show_unpriced=False, perp_keys=()):
             for coin, amt in holdings.items():
-                p_key = 'USDC' if coin == 'USDC (HL)' else coin
-                data = price_data.get(p_key)
-                price = data['current'] if data else 0
+                price = price_of(coin, local_prices)
                 val = amt * price
-                if val > 1.0: # Show only > $1
+                # 用 abs：HL 的空头仓位 amt 为负，原逻辑 `amt > 0` 会把空头整条吞掉
+                if abs(val) > 1.0:
                     all_holdings_list.append({
-                        'coin': coin, 
-                        'amt': amt, 
-                        'val': val, 
-                        'icon': source_icon
+                        'coin': coin,
+                        'amt': amt,
+                        'val': val,
+                        'icon': source_icon,
+                        'is_perp': coin in perp_keys
                     })
-                elif amt > 0 and price == 0:
+                elif amt != 0 and show_unpriced:
+                    # HL 的币即使定不出价也要列出来，否则看起来像「没读进来」
+                    all_holdings_list.append({
+                        'coin': coin,
+                        'amt': amt,
+                        'val': 0,
+                        'no_price': True,
+                        'icon': source_icon,
+                        'is_perp': coin in perp_keys
+                    })
+                elif amt != 0 and price == 0:
                      logger.warning(f"⚠️ Zero Price for {coin} (Amount: {amt}) - Check if pricing symbol matches")
 
         collect_details(binance, '🔶')
         collect_details(gate, '🚪')
-        collect_details(hl, '💧')
+        collect_details(hl, '💧', hl_mids, show_unpriced=True, perp_keys=hl_perp_keys)
 
         # Sort by value DESC
-        all_holdings_list.sort(key=lambda x: x['val'], reverse=True)
-
-        # Sort by value DESC
-        all_holdings_list.sort(key=lambda x: x['val'], reverse=True)
+        all_holdings_list.sort(key=lambda x: abs(x['val']), reverse=True)
 
         for item in all_holdings_list:
             # Use comma for thousands, 4 decimals for small amounts, 2 for large
-            qty_fmt = "{:,.4f}" if item['amt'] < 1000 else "{:,.2f}"
-            report_msg += f"{item['icon']} **{item['coin']}**: {qty_fmt.format(item['amt'])} (${item['val']:,.0f})\n"
+            qty_fmt = "{:,.4f}" if abs(item['amt']) < 1000 else "{:,.2f}"
+            if item.get('no_price'):
+                line = f"{item['icon']} **{item['coin']}**: {qty_fmt.format(item['amt'])} (无价)"
+            else:
+                v = item['val']
+                val_str = f"-${abs(v):,.0f}" if v < 0 else f"${v:,.0f}"
+                line = f"{item['icon']} **{item['coin']}**: {qty_fmt.format(item['amt'])} ({val_str})"
+            if item.get('is_perp'):
+                line += " ｜永续，已含在账户权益内"
+            report_msg += line + "\n"
             
         if FETCH_ERRORS:
             report_msg += f"\n⚠️ **抓取异常信息**:\n"
