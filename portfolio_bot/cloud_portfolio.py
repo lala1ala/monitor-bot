@@ -4,6 +4,7 @@ import time
 import logging
 import asyncio
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import ccxt.async_support as ccxt
 
@@ -264,42 +265,122 @@ def fetch_hyperliquid_balance(wallet):
     return holdings, perp_keys
 
 
-def fetch_hyperliquid_mids():
-    """Hyperliquid 自己的行情（allMids），用来给 HL 持仓定价。
+HL_INFO = 'https://api.hyperliquid.xyz/info'
+# 现货 pair 里这些是稳定币计价，1 枚 ≈ 1 美元
+STABLE_QUOTES = ('USDC', 'USDH', 'USDT0', 'USDE')
+
+
+def _hl_pair_map(proxies):
+    """币名 -> 以稳定币计价的现货 pair 名（供 l2Book 取中间价）。
+
+    为什么需要：allMids 只覆盖有挂单的币。UBTC/USOL/UVIRT 这类 Unit 封装资产
+    （2026-11-02 实测）不在 allMids 里，但它们在 spot 有真实交易对，
+    l2Book 能给出准确中间价（UBTC=$78,248 / USOL=$94.57）。
+    同一币有多个交易对时优先 USDC 计价那个。
+    """
+    try:
+        resp = requests.post(HL_INFO, json={'type': 'spotMeta'}, proxies=proxies, timeout=10)
+        if resp.status_code != 200:
+            logger.error(f"[HL] spotMeta status={resp.status_code}")
+            return {}
+        meta = resp.json()
+    except Exception as e:
+        logger.error(f"[HL] spotMeta 失败: {e}")
+        return {}
+
+    tok = {t['index']: t['name'] for t in meta.get('tokens', [])}
+    best = {}
+    for u in meta.get('universe', []):
+        ids = u.get('tokens') or []
+        if len(ids) != 2:
+            continue
+        base, quote = tok.get(ids[0]), tok.get(ids[1])
+        if not base or quote not in STABLE_QUOTES:
+            continue
+        prev = best.get(base)
+        if prev is None or (quote == 'USDC' and prev[1] != 'USDC'):
+            best[base] = (u.get('name'), quote)
+    logger.info(f"[HL] spotMeta 建立 {len(best)} 个币的 pair 映射")
+    return best
+
+
+def _l2_mid(pair, proxies):
+    """单个 pair 的买卖盘中间价。无挂单返回 None。"""
+    try:
+        r = requests.post(HL_INFO, json={'type': 'l2Book', 'coin': pair},
+                          proxies=proxies, timeout=8)
+        if r.status_code != 200:
+            return None
+        levels = (r.json().get('levels') or [[], []])
+        bids, asks = levels[0], levels[1]
+        bb = float(bids[0]['px']) if bids else None
+        ba = float(asks[0]['px']) if asks else None
+        if bb and ba:
+            return (bb + ba) / 2
+        return bb or ba
+    except Exception:
+        return None
+
+
+def fetch_hyperliquid_mids(need=None):
+    """Hyperliquid 自己的行情，用来给 HL 持仓定价。
 
     为什么必须用它：HL 现货共 511 个币种，其中 475 个（93%）在币安没有 USDT
     交易对。原来只从币安/Gate 抓价，这批币 price=0，被 `if val > 1.0` 判成
     「没有价值」直接丢弃 —— 表现就是「HL 的其他币种余额没读取进来」。
-    allMids 一次请求返回全部永续+现货中间价（2026-11-02 实测 1423 条）。
 
-    ⚠️ USDC 不在 allMids 里，由调用方按 1.0 兜底。
+    两段式取价：
+      1) allMids —— 一次请求覆盖大部分有挂单的币（2026-11-02 实测 1423 条）
+      2) 对 still 缺价的持仓币，用 spotMeta 映射到交易对，l2Book 取中间价。
+         因为 allMids 并不全覆盖：UBTC/USOL/UVIRT 都不在里面（实测），
+         但它们的 l2Book 中间价是准的。
+
+    ⚠️ USDC 两段都拿不到，由 price_of 按 1.0 兜底。
     """
     proxies = None
     if CONFIG['PROXY_URL']:
         proxies = {'http': CONFIG['PROXY_URL'], 'https': CONFIG['PROXY_URL']}
+
+    out = {}
     try:
-        resp = requests.post('https://api.hyperliquid.xyz/info',
-                             json={'type': 'allMids'}, proxies=proxies, timeout=10)
+        resp = requests.post(HL_INFO, json={'type': 'allMids'}, proxies=proxies, timeout=10)
         if resp.status_code != 200:
             FETCH_ERRORS['hyperliquid_mids'] = f"API returned status {resp.status_code}"
             logger.error(f"Hyperliquid mids API returned status {resp.status_code}")
-            return {}
-        out = {}
-        for k, v in resp.json().items():
-            try:
-                px = float(v)
-            except (TypeError, ValueError):
-                continue
-            if px > 0:
-                out[k] = px
-        if 'hyperliquid_mids' in FETCH_ERRORS:
-            del FETCH_ERRORS['hyperliquid_mids']
-        logger.info(f"[HL] allMids 取到 {len(out)} 条报价")
-        return out
+        else:
+            for k, v in resp.json().items():
+                try:
+                    px = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if px > 0:
+                    out[k] = px
+            if 'hyperliquid_mids' in FETCH_ERRORS:
+                del FETCH_ERRORS['hyperliquid_mids']
+            logger.info(f"[HL] allMids 取到 {len(out)} 条报价")
     except Exception as e:
         FETCH_ERRORS['hyperliquid_mids'] = str(e)[:120]
         logger.error(f"Error fetching Hyperliquid mids: {e}")
-        return {}
+
+    # ---- 第二段：l2Book 补 allMids 缺的持仓币 ----
+    if need:
+        miss = [c for c in need if c not in out and c != 'USDC (HL)']
+        if miss:
+            pairs = _hl_pair_map(proxies)
+            got = 0
+            if pairs:
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    futs = {ex.submit(_l2_mid, pairs[c][0], proxies): c
+                            for c in miss if c in pairs}
+                    for f in as_completed(futs):
+                        px = f.result()
+                        if px and px > 0:
+                            out[futs[f]] = px
+                            got += 1
+            still = [c for c in miss if c not in out]
+            logger.info(f"[HL] allMids 缺 {len(miss)} 个，l2Book 补到 {got} 个；"
+                        f"仍无价: {still if still else '无'}")
+    return out
 
 
 async def get_prices_with_history(symbols):
@@ -419,8 +500,9 @@ async def run_scan(force_report=False):
     gate = await fetch_ccxt_balance('gate', CONFIG['GATE'])
     hl, hl_perp_keys = await asyncio.to_thread(
         fetch_hyperliquid_balance, CONFIG['HYPERLIQUID_WALLET'])
-    # HL 自己的行情：给 HL 持仓定价（币安只覆盖 HL 币种的 7%）
-    hl_mids = await asyncio.to_thread(fetch_hyperliquid_mids)
+    # HL 自己的行情：给 HL 持仓定价（币安只覆盖 HL 币种的 7%）。
+    # 传入持仓币名，让函数对 allMids 缺价的币走 l2Book 兜底
+    hl_mids = await asyncio.to_thread(fetch_hyperliquid_mids, list(hl.keys()))
 
     # 需要外所报价的币 = 币安/Gate 的币 + HL 里 HL 自己定不了价的币。
     # HL 已能定价的不再拿去币安/Gate 试，省掉几百次注定失败的请求
@@ -436,10 +518,13 @@ async def run_scan(force_report=False):
     exchange_totals = {'Binance': 0, 'Gate': 0, 'Hyperliquid': 0}
 
     def price_of(coin, local_prices=None):
-        """取价：HL 持仓优先用 HL 自己的 allMids，其余用币安/Gate。"""
+        """取价：HL 持仓优先用 HL 自己的行情，其余用币安/Gate。"""
         p_key = 'USDC' if coin == 'USDC (HL)' else coin
         if local_prices and p_key in local_prices:
             return local_prices[p_key]
+        # 稳定币直接按 1.0，不依赖外所（外所抽风时保证金会被算成 0）
+        if p_key in ('USDC', 'USDH', 'USDT', 'USDE', 'USDT0'):
+            return 1.0
         data = price_data.get(p_key)
         return data['current'] if data else 0
 
